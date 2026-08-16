@@ -40,8 +40,8 @@ export interface GuildConfig {
   channels: { verification: string; logs: string };
   quiz: {
     maxAttempts: number;
-    passPercentage: number;
     questions: QuizQuestion[];
+    finalQuestion: FinalQuestion | null;
   };
   termsAndConditions: string;
   isSetup: boolean;
@@ -53,6 +53,11 @@ export interface QuizQuestion {
   type: "yes_no" | "multiple_choice";
   options: string[];
   correctAnswer: string;
+}
+
+export interface FinalQuestion {
+  question: string;
+  expectedAnswer: string;
 }
 
 export interface ChannelMapping {
@@ -73,7 +78,6 @@ export function getGlobalConfig(): GlobalConfig {
     throw new Error("DISCORD_BOT_TOKEN not set in .env");
   }
 
-  // Client ID will be set when bot connects, fallback to .env
   _global = {
     token: env.DISCORD_BOT_TOKEN,
     clientId: env.CLIENT_ID || "",
@@ -93,7 +97,22 @@ export function setClientId(clientId: string): void {
 
 // ─── Per-Guild Config (from DB) ───
 
-const defaultQuiz: QuizQuestion[] = [];
+const defaultQuestions: QuizQuestion[] = [
+  { id: 1, question: "Must you follow both global and channel-specific rules?", type: "yes_no", options: ["Yes", "No"], correctAnswer: "Yes" },
+  { id: 2, question: "Can you ask for support in non-support channels?", type: "yes_no", options: ["Yes", "No"], correctAnswer: "No" },
+  { id: 3, question: "Which languages are allowed in this server?", type: "multiple_choice", options: ["English & Hindi", "Any language", "English only"], correctAnswer: "English & Hindi" },
+  { id: 4, question: "Must you follow Discord's Community Guidelines?", type: "yes_no", options: ["Yes", "No"], correctAnswer: "Yes" },
+  { id: 5, question: "Does spoilable content need to be marked with context?", type: "yes_no", options: ["Yes", "No"], correctAnswer: "Yes" },
+  { id: 6, question: "Can you advertise without staff permission?", type: "yes_no", options: ["Yes", "No"], correctAnswer: "No" },
+  { id: 7, question: "Is impersonation allowed?", type: "yes_no", options: ["Yes", "No"], correctAnswer: "No" },
+  { id: 8, question: "Should you use common sense and not spam?", type: "yes_no", options: ["Yes", "No"], correctAnswer: "Yes" },
+  { id: 9, question: "Is politics allowed in the server?", type: "yes_no", options: ["Yes", "No"], correctAnswer: "No" },
+];
+
+const defaultFinalQuestion: FinalQuestion = {
+  question: "No sharing of 3rd-party extensions, repositories or APKs. Type: I will not share any third-party extensions, repos or APKs",
+  expectedAnswer: "I will not share any third-party extensions, repos or APKs",
+};
 
 const defaultTerms = "";
 
@@ -103,15 +122,32 @@ export function getGuildConfig(guildId: string): GuildConfig {
   const row = db.prepare("SELECT * FROM guild_configs WHERE guild_id = ?").get(guildId) as any;
 
   if (!row) {
-    // Not set up — return defaults
     return {
       guildId,
       roles: { unverified: "", verified: "", admin: "" },
       channels: { verification: "", logs: "" },
-      quiz: { maxAttempts: 3, passPercentage: 80, questions: defaultQuiz },
+      quiz: { maxAttempts: 3, questions: defaultQuestions, finalQuestion: defaultFinalQuestion },
       termsAndConditions: defaultTerms,
       isSetup: false,
     };
+  }
+
+  // Parse quiz_json — handle old format (array) and new format (object)
+  let quizData: { questions: QuizQuestion[]; finalQuestion: FinalQuestion | null };
+  if (row.quiz_json) {
+    const parsed = JSON.parse(row.quiz_json);
+    if (Array.isArray(parsed)) {
+      // Old format: just questions array
+      quizData = { questions: parsed, finalQuestion: defaultFinalQuestion };
+    } else {
+      // New format: object with questions + finalQuestion
+      quizData = {
+        questions: parsed.questions || defaultQuestions,
+        finalQuestion: parsed.finalQuestion || null,
+      };
+    }
+  } else {
+    quizData = { questions: defaultQuestions, finalQuestion: defaultFinalQuestion };
   }
 
   return {
@@ -124,8 +160,8 @@ export function getGuildConfig(guildId: string): GuildConfig {
     })(),
     quiz: {
       maxAttempts: row.max_attempts || 3,
-      passPercentage: row.pass_percentage || 80,
-      questions: row.quiz_json ? JSON.parse(row.quiz_json) : defaultQuiz,
+      questions: quizData.questions,
+      finalQuestion: quizData.finalQuestion,
     },
     termsAndConditions: row.terms || defaultTerms,
     isSetup: !!row.is_setup,
@@ -156,9 +192,9 @@ export function saveGuildConfig(guildId: string, data: Partial<GuildConfig>): vo
     guildId,
     JSON.stringify(merged.roles),
     JSON.stringify(merged.channels),
-    JSON.stringify(merged.quiz.questions),
+    JSON.stringify({ questions: merged.quiz.questions, finalQuestion: merged.quiz.finalQuestion }),
     merged.termsAndConditions,
-    merged.quiz.passPercentage,
+    100, // all must be correct
     merged.quiz.maxAttempts,
   );
 }
@@ -171,7 +207,6 @@ export function loadConfig(): GlobalConfig {
   return getGlobalConfig();
 }
 export function saveConfig(_config: any): void {
-  // No-op for global config — use saveGuildConfig for per-guild
   console.warn("saveConfig is deprecated. Use saveGuildConfig(guildId, data) instead.");
 }
 

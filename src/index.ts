@@ -13,6 +13,7 @@ import { MigrationModule } from "./modules/migration.js";
 import { getSetupCommands, handleSetupCommand, handleSetupInteraction } from "./commands/setup.js";
 import {
   getPostVerifyCommand, handlePostVerifyCommand,
+  getSetFinalQuestionCommand, handleSetFinalQuestionCommand,
   getQuizAddCommand, handleQuizAddCommand,
   getQuizListCommand, handleQuizListCommand,
   getQuizRemoveCommand, handleQuizRemoveCommand,
@@ -66,6 +67,7 @@ const commands = [
 
   // Rules & Quiz management (admin)
   getPostVerifyCommand(),
+  getSetFinalQuestionCommand(),
   getQuizAddCommand(),
   getQuizListCommand(),
   getQuizRemoveCommand(),
@@ -151,7 +153,7 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
   const guildId = interaction.guild?.id || "";
 
   // Don't deferReply for commands that show their own modal
-  if (commandName !== "setup" && commandName !== "post-verify" && commandName !== "quiz-add") {
+  if (commandName !== "setup" && commandName !== "post-verify" && commandName !== "quiz-add" && commandName !== "set-final-question") {
     await interaction.deferReply({ ephemeral: true }).catch(() => {});
   }
 
@@ -212,6 +214,9 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
       // ── Rules & Quiz Management (admin) ──
       case "post-verify":
         await handlePostVerifyCommand(interaction, client);
+        break;
+      case "set-final-question":
+        await handleSetFinalQuestionCommand(interaction, client);
         break;
       case "quiz-add":
         await handleQuizAddCommand(interaction, client);

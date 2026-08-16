@@ -5,22 +5,39 @@ import {
   ModalBuilder, TextInputBuilder, TextInputStyle, TextChannel,
 } from "discord.js";
 import { getDb } from "../db.js";
-import { getGuildConfig, getGlobalConfig, GuildConfig, QuizQuestion } from "../config.js";
+import { getGuildConfig, getGlobalConfig, GuildConfig, QuizQuestion, FinalQuestion } from "../config.js";
 import { getOAuth2Url, hasValidToken, truncate } from "../utils.js";
 
 /**
  * Module 3 — Verification + Quiz Gate (Shared Panel, Multi-Server)
  *
- * Flow:
- * 1. Admin posts rules manually in verification channel
- * 2. Admin runs /post-verify → bot posts ONE message with "Verify Me" button
- * 3. When member joins → bot assigns Unverified role + brief welcome
- * 4. User clicks shared "Verify Me" button
- * 5. If no token → gets authorize link
- * 6. Takes quiz → pass → Verified role, fail → retry
+ * Quiz: 4 random MCQs from pool + 1 fixed question, shuffled, all 5 in modal.
+ * All answers must be correct (exact match, case-insensitive).
  *
- * All logs go to logs channel.
+ * Flow:
+ * 1. Admin posts rules, runs /post-verify
+ * 2. Member joins → Unverified role assigned + logged
+ * 3. User clicks Verify Me → quiz modal (5 questions)
+ * 4. Pass (5/5) → Verified role, Fail → retry
  */
+
+interface QuizItem {
+  slotId: number;
+  question: string;
+  options: string[];
+  correctAnswer: string;
+  isFixed: boolean;
+}
+
+function shuffleArray<T>(arr: T[]): T[] {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
 export class VerificationModule {
   private client: Client;
 
@@ -29,7 +46,6 @@ export class VerificationModule {
     this.setupListeners();
   }
 
-  /** Send a log message to the logs channel for this guild */
   private async sendLog(guildId: string, content: string): Promise<void> {
     try {
       const config = getGuildConfig(guildId);
@@ -58,11 +74,9 @@ export class VerificationModule {
         return;
       }
 
-      // Record in DB
       getDb().prepare("INSERT OR IGNORE INTO verifications (user_id, guild_id, status) VALUES (?, ?, 'pending')")
         .run(member.user.id, guildId);
 
-      // Log to logs channel
       await this.sendLog(guildId, `👤 **${member.user.username}** (<@${member.user.id}>) joined — assigned Unverified role`);
     });
 
@@ -90,10 +104,9 @@ export class VerificationModule {
         return;
       }
 
-      // If no token, give them their authorize link
       if (!hasValidToken(userId)) {
         try {
-          const authUrl = getOAuth2Url(userId);
+          const authUrl = getOAuth2Url();
           await interaction.reply({
             content: `🔒 You need to authorize the bot first!\n\nClick here: **[🔗 Authorize Bot](${authUrl})**\n\nThen click **✅ Verify Me** again.`,
             ephemeral: true,
@@ -107,8 +120,8 @@ export class VerificationModule {
         return;
       }
 
-      if (!config.quiz.questions.length) {
-        await interaction.reply({ content: "❌ No quiz questions configured. Admin needs to add questions with /quiz-add.", ephemeral: true });
+      if (!config.quiz.questions.length && !config.quiz.finalQuestion) {
+        await interaction.reply({ content: "❌ No quiz configured. Admin needs to add questions with /quiz-add.", ephemeral: true });
         return;
       }
 
@@ -132,35 +145,77 @@ export class VerificationModule {
       for (const q of config.quiz.questions) {
         answers[q.id - 1] = interaction.fields.getTextInputValue(`q_${q.id}`).trim();
       }
-      console.log(`[Quiz] User ${userId} answers:`, JSON.stringify(answers), "Questions:", JSON.stringify(config.quiz.questions.map(q => ({ id: q.id, correct: q.correctAnswer, options: q.options }))));
+      // Fixed question
+      if (config.quiz.finalQuestion) {
+        answers[100] = interaction.fields.getTextInputValue("q_fixed").trim();
+      }
+
+      console.log(`[Quiz] User ${userId} answers:`, JSON.stringify(answers));
 
       await interaction.reply({ content: "✅ All answers submitted! Grading...", ephemeral: true });
       setTimeout(() => this.grade(userId, guildId, interaction, answers), 500);
     });
   }
 
+  /** Build quiz items: 4 random MCQs + 1 fixed, shuffled */
+  private buildQuizItems(config: GuildConfig): QuizItem[] {
+    const items: QuizItem[] = [];
+
+    // Pick 4 random MCQs (or fewer if pool is small)
+    const pool = config.quiz.questions.length > 4
+      ? shuffleArray(config.quiz.questions).slice(0, 4)
+      : shuffleArray(config.quiz.questions);
+
+    pool.forEach((q, i) => {
+      items.push({
+        slotId: q.id,
+        question: q.question,
+        options: q.options,
+        correctAnswer: q.correctAnswer,
+        isFixed: false,
+      });
+    });
+
+    // Add fixed question
+    if (config.quiz.finalQuestion) {
+      items.push({
+        slotId: 100,
+        question: config.quiz.finalQuestion.question,
+        options: [],
+        correctAnswer: config.quiz.finalQuestion.expectedAnswer,
+        isFixed: true,
+      });
+    }
+
+    return shuffleArray(items);
+  }
+
   private async sendQuizModal(interaction: any, guildId: string) {
     const config = getGuildConfig(guildId);
-    const questions = config.quiz.questions.slice(0, 5);
+    const items = this.buildQuizItems(config);
 
-    if (!questions.length) return;
+    if (!items.length) return;
 
-    const actionRows = questions.map((q) => {
-      const optionsText = q.options.map((o, i) => `${String.fromCharCode(65 + i)}. ${o}`).join(" | ");
+    const actionRows = items.map((item) => {
+      const label = item.isFixed ? truncate(item.question, 40) : `Q: ${truncate(item.question, 40)}`;
+      const placeholder = item.isFixed
+        ? "Type the exact text..."
+        : item.options.map((o, i) => `${String.fromCharCode(65 + i)}. ${o}`).join(" | ");
+
       return new ActionRowBuilder<TextInputBuilder>().addComponents(
         new TextInputBuilder()
-          .setCustomId(`q_${q.id}`)
-          .setLabel(`Q${q.id}: ${truncate(q.question, 40)}`)
-          .setStyle(TextInputStyle.Short)
-          .setPlaceholder(`A, B, or answer (${optionsText})`)
+          .setCustomId(item.isFixed ? "q_fixed" : `q_${item.slotId}`)
+          .setLabel(label)
+          .setStyle(item.isFixed ? TextInputStyle.Paragraph : TextInputStyle.Short)
+          .setPlaceholder(placeholder)
           .setRequired(true)
-          .setMaxLength(100)
+          .setMaxLength(item.isFixed ? 300 : 100)
       );
     });
 
     const modal = new ModalBuilder()
       .setCustomId(`quiz_all_${interaction.user.id}_${guildId}`)
-      .setTitle(`🔐 Verification Quiz (${questions.length} questions)`)
+      .setTitle(`🔐 Verification Quiz (${items.length} questions)`)
       .addComponents(...actionRows);
 
     try {
@@ -175,29 +230,45 @@ export class VerificationModule {
     const db = getDb();
     let correct = 0;
     const wrongQuestions: string[] = [];
+    const items = this.buildQuizItems(config);
 
-    for (const q of config.quiz.questions) {
-      const userAns = (answers[q.id - 1] || "").trim().toLowerCase();
-      const correctIdx = q.options.findIndex((o) => o.toLowerCase() === q.correctAnswer.toLowerCase());
-      if (
-        userAns === q.correctAnswer.toLowerCase() ||
-        userAns === String(correctIdx) ||
-        userAns === String.fromCharCode(65 + correctIdx).toLowerCase()
-      ) {
-        correct++;
+    for (const item of items) {
+      const userAns = (answers[item.slotId] || "").trim().toLowerCase();
+
+      if (item.isFixed) {
+        // Fixed question: exact match (case-insensitive, trimmed)
+        const expected = item.correctAnswer.trim().toLowerCase();
+        if (userAns === expected) {
+          correct++;
+        } else {
+          wrongQuestions.push(
+            `❌ **${item.question}**\n` +
+            `   Their answer: **${answers[item.slotId] || "(empty)"}**\n` +
+            `   Correct answer: **${item.correctAnswer}**`
+          );
+        }
       } else {
-        const correctLetter = String.fromCharCode(65 + correctIdx);
-        wrongQuestions.push(
-          `❌ **Q${q.id}: ${q.question}**\n` +
-          `   Their answer: **${answers[q.id - 1] || "(empty)"}**\n` +
-          `   Correct answer: **${correctLetter}. ${q.correctAnswer}**`
-        );
+        // MCQ: exact match (case-insensitive) — text or letter
+        const correctIdx = item.options.findIndex((o) => o.toLowerCase() === item.correctAnswer.toLowerCase());
+        if (
+          userAns === item.correctAnswer.toLowerCase() ||
+          userAns === String(correctIdx) ||
+          userAns === String.fromCharCode(65 + correctIdx).toLowerCase()
+        ) {
+          correct++;
+        } else {
+          const correctLetter = String.fromCharCode(65 + correctIdx);
+          wrongQuestions.push(
+            `❌ **${item.question}**\n` +
+            `   Their answer: **${answers[item.slotId] || "(empty)"}**\n` +
+            `   Correct answer: **${correctLetter}. ${item.correctAnswer}**`
+          );
+        }
       }
     }
 
-    const total = config.quiz.questions.length;
-    const pct = Math.round((correct / total) * 100);
-    const passed = pct >= config.quiz.passPercentage;
+    const total = items.length;
+    const passed = correct === total; // all must be correct
     const record = db.prepare("SELECT attempts FROM verifications WHERE user_id = ? AND guild_id = ?").get(userId, guildId) as any;
     const newAttempts = (record?.attempts || 0) + 1;
     const username = interaction.user?.username || userId;
@@ -205,7 +276,7 @@ export class VerificationModule {
     try {
       if (passed) {
         db.prepare("UPDATE verifications SET status = 'verified', quiz_passed_at = datetime('now'), attempts = ?, score = ?, answers_json = ? WHERE user_id = ? AND guild_id = ?")
-          .run(newAttempts, pct, JSON.stringify(answers), userId, guildId);
+          .run(newAttempts, correct, JSON.stringify(answers), userId, guildId);
 
         const guild = await this.client.guilds.fetch(guildId);
         const member = await guild.members.fetch(userId);
@@ -214,14 +285,14 @@ export class VerificationModule {
 
         await this.sendLog(guildId,
           `✅ **${username}** (<@${userId}>) **PASSED verification!**\n` +
-          `📊 Score: **${correct}/${total} (${pct}%)** — Attempt #${newAttempts}\n` +
+          `📊 Score: **${correct}/${total}** — All correct! — Attempt #${newAttempts}\n` +
           `🎖️ Verified role assigned, Unverified role removed`
         );
 
-        await interaction.followUp({ content: `🎉 **Passed!** ${correct}/${total} (${pct}%). You now have full access!`, ephemeral: true });
+        await interaction.followUp({ content: `🎉 **Passed!** ${correct}/${total} — All correct! You now have full access!`, ephemeral: true });
       } else {
         db.prepare("UPDATE verifications SET status = 'failed', attempts = ?, score = ?, answers_json = ? WHERE user_id = ? AND guild_id = ?")
-          .run(newAttempts, pct, JSON.stringify(answers), userId, guildId);
+          .run(newAttempts, correct, JSON.stringify(answers), userId, guildId);
 
         const wrongBlock = wrongQuestions.length > 0
           ? `\n\n**Wrong answers:**\n${wrongQuestions.join("\n\n")}`
@@ -231,12 +302,12 @@ export class VerificationModule {
         if (remaining > 0) {
           await this.sendLog(guildId,
             `❌ **${username}** (<@${userId}>) **FAILED verification**\n` +
-            `📊 Score: **${correct}/${total} (${pct}%)** — Attempt #${newAttempts}/${config.quiz.maxAttempts}\n` +
+            `📊 Score: **${correct}/${total}** — All must be correct! — Attempt #${newAttempts}/${config.quiz.maxAttempts}\n` +
             `${remaining} attempt${remaining > 1 ? "s" : ""} remaining` +
             wrongBlock
           );
           await interaction.followUp({
-            content: `❌ **Failed** — ${correct}/${total} (${pct}%). Need ${config.quiz.passPercentage}%.\n${remaining} attempt${remaining > 1 ? "s" : ""} remaining.`,
+            content: `❌ **Failed** — ${correct}/${total}. All answers must be correct.\n${remaining} attempt${remaining > 1 ? "s" : ""} remaining.`,
             ephemeral: true,
           });
         } else {
@@ -244,7 +315,7 @@ export class VerificationModule {
 
           await this.sendLog(guildId,
             `⚠️ **${username}** (<@${userId}>) **EXHAUSTED all ${config.quiz.maxAttempts} attempts**\n` +
-            `📊 Final score: **${correct}/${total} (${pct}%)**\n` +
+            `📊 Final score: **${correct}/${total}**\n` +
             `🚩 Flagged for admin review` +
             wrongBlock
           );
@@ -290,6 +361,6 @@ export class VerificationModule {
   getFlagged(guildId: string): string {
     const users = getDb().prepare("SELECT user_id, attempts, score FROM verifications WHERE guild_id = ? AND status = 'flagged_review'").all(guildId) as any[];
     if (!users.length) return "📋 No flagged users";
-    return "⚠️ **Flagged for review:**\n" + users.map((u) => `• <@${u.user_id}> — ${u.attempts} attempts, ${u.score}%`).join("\n");
+    return "⚠️ **Flagged for review:**\n" + users.map((u) => `• <@${u.user_id}> — ${u.attempts} attempts, ${u.score}/${5}`).join("\n");
   }
 }

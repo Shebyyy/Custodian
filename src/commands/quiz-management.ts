@@ -4,7 +4,7 @@ import {
   ActionRowBuilder, ButtonBuilder, ButtonStyle, TextInputBuilder, TextInputStyle,
   SlashCommandBuilder, PermissionFlagsBits,
 } from "discord.js";
-import { getGuildConfig, saveGuildConfig, QuizQuestion } from "../config.js";
+import { getGuildConfig, saveGuildConfig, QuizQuestion, FinalQuestion } from "../config.js";
 import { getOAuth2Url } from "../utils.js";
 
 // ─── /post-verify ───
@@ -24,9 +24,7 @@ export async function handlePostVerifyCommand(interaction: CommandInteraction, c
     return;
   }
 
-  const { ActionRowBuilder: Arb, ButtonBuilder, ButtonStyle } = await import("discord.js");
-
-  const row = new Arb<ButtonBuilder>().addComponents(
+  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder()
       .setURL(getOAuth2Url())
       .setLabel("🔗 Authorize Bot")
@@ -55,11 +53,53 @@ export async function handlePostVerifyCommand(interaction: CommandInteraction, c
   }
 }
 
+// ─── /set-final-question ───
+export function getSetFinalQuestionCommand() {
+  return new SlashCommandBuilder()
+    .setName("set-final-question")
+    .setDescription("Set the fixed acknowledgment question (shown to all users)")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator);
+}
+
+export async function handleSetFinalQuestionCommand(interaction: CommandInteraction, client: Client): Promise<void> {
+  const guildId = interaction.guild?.id || "";
+  const config = getGuildConfig(guildId);
+
+  const modal = new ModalBuilder()
+    .setCustomId(`set_final_q:${guildId}`)
+    .setTitle("📝 Set Fixed Question");
+
+  const questionInput = new ActionRowBuilder<TextInputBuilder>().addComponents(
+    new TextInputBuilder()
+      .setCustomId("question")
+      .setLabel("Question Text")
+      .setStyle(TextInputStyle.Paragraph)
+      .setValue(config.quiz.finalQuestion?.question || "")
+      .setPlaceholder("e.g. No sharing of 3rd-party repos. Type: I will not share...")
+      .setRequired(true)
+      .setMaxLength(500)
+  );
+
+  const answerInput = new ActionRowBuilder<TextInputBuilder>().addComponents(
+    new TextInputBuilder()
+      .setCustomId("answer")
+      .setLabel("Expected Answer (exact match)")
+      .setStyle(TextInputStyle.Paragraph)
+      .setValue(config.quiz.finalQuestion?.expectedAnswer || "")
+      .setPlaceholder("e.g. I will not share any third-party repos or APKs")
+      .setRequired(true)
+      .setMaxLength(500)
+  );
+
+  modal.addComponents(questionInput, answerInput);
+  await interaction.showModal(modal);
+}
+
 // ─── /quiz-add ───
 export function getQuizAddCommand() {
   return new SlashCommandBuilder()
     .setName("quiz-add")
-    .setDescription("Add a quiz question (max 5 total)")
+    .setDescription("Add a quiz question to the pool")
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator);
 }
 
@@ -67,21 +107,16 @@ export async function handleQuizAddCommand(interaction: CommandInteraction, clie
   const guildId = interaction.guild?.id || "";
   const config = getGuildConfig(guildId);
 
-  if (config.quiz.questions.length >= 5) {
-    await interaction.reply({ content: "❌ Max 5 questions allowed (Discord modal limit). Use /quiz-remove to remove one first.", ephemeral: true });
-    return;
-  }
-
   const modal = new ModalBuilder()
     .setCustomId(`quiz_add:${guildId}`)
-    .setTitle(`➕ Add Quiz Question (${config.quiz.questions.length}/5)`);
+    .setTitle(`➕ Add Quiz Question (Pool: ${config.quiz.questions.length})`);
 
   const questionInput = new ActionRowBuilder<TextInputBuilder>().addComponents(
     new TextInputBuilder()
       .setCustomId("question")
       .setLabel("Question")
       .setStyle(TextInputStyle.Paragraph)
-      .setPlaceholder("e.g. Is spam allowed in this server?")
+      .setPlaceholder("e.g. Is spam allowed?")
       .setRequired(true)
       .setMaxLength(300)
   );
@@ -117,7 +152,6 @@ export async function handleQuizAddCommand(interaction: CommandInteraction, clie
   );
 
   modal.addComponents(questionInput, optionA, optionB, correctInput);
-
   await interaction.showModal(modal);
 }
 
@@ -125,7 +159,7 @@ export async function handleQuizAddCommand(interaction: CommandInteraction, clie
 export function getQuizListCommand() {
   return new SlashCommandBuilder()
     .setName("quiz-list")
-    .setDescription("View all quiz questions")
+    .setDescription("View all quiz questions and fixed question")
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator);
 }
 
@@ -133,28 +167,38 @@ export async function handleQuizListCommand(interaction: CommandInteraction, cli
   const guildId = interaction.guild?.id || "";
   const config = getGuildConfig(guildId);
 
-  if (!config.quiz.questions.length) {
-    await interaction.editReply({ content: "📋 No quiz questions configured.\nUse **/quiz-add** to add questions." });
-    return;
+  let content = "";
+
+  // MCQ pool
+  if (config.quiz.questions.length) {
+    const list = config.quiz.questions.map((q) => {
+      const options = q.options.map((o, i) => `${String.fromCharCode(65 + i)}. ${o}${o === q.correctAnswer ? " ✅" : ""}`).join(" | ");
+      return `**Q${q.id}:** ${q.question}\n   ${options}`;
+    }).join("\n\n");
+    content += `📋 **Question Pool (${config.quiz.questions.length}):**\nQuiz picks 4 random per attempt.\n\n${list}`;
+  } else {
+    content += `📋 **Question Pool:** Empty — use /quiz-add`;
   }
 
-  const list = config.quiz.questions.map((q) => {
-    const options = q.options.map((o, i) => `${String.fromCharCode(65 + i)}. ${o}${o === q.correctAnswer ? " ✅" : ""}`).join(" | ");
-    return `**Q${q.id}:** ${q.question}\n   ${options}`;
-  }).join("\n\n");
+  // Fixed question
+  if (config.quiz.finalQuestion) {
+    content += `\n\n---\n\n📌 **Fixed Question (always shown):**\n**Q:** ${config.quiz.finalQuestion.question}\n**Answer:** \`${config.quiz.finalQuestion.expectedAnswer}\``;
+  } else {
+    content += `\n\n---\n\n📌 **Fixed Question:** Not set — use /set-final-question`;
+  }
 
-  await interaction.editReply({
-    content: `📋 **Quiz Questions (${config.quiz.questions.length}/5):**\nPass: ${config.quiz.passPercentage}% | Max attempts: ${config.quiz.maxAttempts}\n\n${list}`,
-  });
+  content += `\n\n⚙️ Max attempts: ${config.quiz.maxAttempts} | All answers must be correct`;
+
+  await interaction.editReply({ content });
 }
 
 // ─── /quiz-remove ───
 export function getQuizRemoveCommand() {
   return new SlashCommandBuilder()
     .setName("quiz-remove")
-    .setDescription("Remove a quiz question by number")
+    .setDescription("Remove a quiz question from the pool by number")
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-    .addIntegerOption((o) => o.setName("number").setDescription("Question number to remove (e.g. 1, 2, 3)").setRequired(true).setMinValue(1).setMaxValue(5));
+    .addIntegerOption((o) => o.setName("number").setDescription("Question number to remove").setRequired(true).setMinValue(1).setMaxValue(99));
 }
 
 export async function handleQuizRemoveCommand(interaction: CommandInteraction, client: Client): Promise<void> {
@@ -164,7 +208,7 @@ export async function handleQuizRemoveCommand(interaction: CommandInteraction, c
 
   const idx = config.quiz.questions.findIndex((q) => q.id === num);
   if (idx === -1) {
-    await interaction.editReply({ content: `❌ No question #${num} found.` });
+    await interaction.editReply({ content: `❌ No question #${num} found. Use /quiz-list to see all.` });
     return;
   }
 
@@ -173,7 +217,7 @@ export async function handleQuizRemoveCommand(interaction: CommandInteraction, c
 
   saveGuildConfig(guildId, { quiz: { ...config.quiz, questions: config.quiz.questions } });
 
-  await interaction.editReply({ content: `🗑️ Removed: **Q${removed[0].id}: ${removed[0].question}**\n${config.quiz.questions.length} question(s) remaining.` });
+  await interaction.editReply({ content: `🗑️ Removed: **Q${removed[0].id}: ${removed[0].question}**\n${config.quiz.questions.length} question(s) remaining in pool.` });
 }
 
 // ─── Handle modal submissions ───
@@ -181,6 +225,31 @@ export async function handleManagementModal(interaction: Interaction, client: Cl
   if (!interaction.isModalSubmit()) return false;
 
   const customId = interaction.customId;
+
+  // ── Set Final Question modal ──
+  if (customId.startsWith("set_final_q:")) {
+    const guildId = customId.split(":")[1];
+    const question = interaction.fields.getTextInputValue("question").trim();
+    const answer = interaction.fields.getTextInputValue("answer").trim();
+
+    if (!question || !answer) {
+      await interaction.reply({ content: "❌ Both fields are required.", ephemeral: true });
+      return true;
+    }
+
+    saveGuildConfig(guildId, {
+      quiz: {
+        ...getGuildConfig(guildId).quiz,
+        finalQuestion: { question, expectedAnswer: answer },
+      },
+    });
+
+    await interaction.reply({
+      content: `✅ **Fixed question updated!**\n\n**Q:** ${question}\n**Answer:** \`${answer}\``,
+      ephemeral: true,
+    });
+    return true;
+  }
 
   // ── Quiz Add modal ──
   if (customId.startsWith("quiz_add:")) {
@@ -196,15 +265,10 @@ export async function handleManagementModal(interaction: Interaction, client: Cl
     }
 
     const config = getGuildConfig(guildId);
-    if (config.quiz.questions.length >= 5) {
-      await interaction.reply({ content: "❌ Max 5 questions. Use /quiz-remove first.", ephemeral: true });
-      return true;
-    }
-
     const newQuestion: QuizQuestion = {
       id: config.quiz.questions.length + 1,
       question,
-      type: "yes_no",
+      type: optionA === "Yes" && optionB === "No" ? "yes_no" : "multiple_choice",
       options: [optionA, optionB],
       correctAnswer,
     };
@@ -216,7 +280,7 @@ export async function handleManagementModal(interaction: Interaction, client: Cl
 
     const options = newQuestion.options.map((o, i) => `${String.fromCharCode(65 + i)}. ${o}${o === correctAnswer ? " ✅" : ""}`).join(" | ");
     await interaction.reply({
-      content: `✅ **Question added!** (${config.quiz.questions.length}/5)\n\n**Q${newQuestion.id}:** ${newQuestion.question}\n   ${options}\n\nUse **/quiz-list** to see all questions.`,
+      content: `✅ **Question added!** (Pool: ${config.quiz.questions.length})\n\n**Q${newQuestion.id}:** ${newQuestion.question}\n   ${options}`,
       ephemeral: true,
     });
     return true;
