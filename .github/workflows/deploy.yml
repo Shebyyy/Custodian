@@ -65,12 +65,10 @@ jobs:
             bun run db:setup
             echo "OK: database ready"
 
-            # Kill old process
+            # Kill ALL old Custodian bot processes
             echo "[6/6] Restarting bot..."
-            if [ -f /root/Custodian/data/bot.pid ]; then
-              kill $(cat /root/Custodian/data/bot.pid) 2>/dev/null || true
-              rm -f /root/Custodian/data/bot.pid
-            fi
+            pkill -9 -f "bun.*Custodian/src/index.ts" 2>/dev/null || true
+            pkill -9 -f "bun.*index.ts" 2>/dev/null || true
             sleep 2
 
             # Start
