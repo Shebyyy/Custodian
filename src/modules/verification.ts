@@ -1,7 +1,7 @@
 // @ts-nocheck — discord.js type quirks with bun
 import {
   ActionRowBuilder, ButtonBuilder, ButtonStyle, Client, Events,
-  GuildMember, Interaction, LinkButtonBuilder,
+  GuildMember, Interaction,
   ModalBuilder, TextInputBuilder, TextInputStyle, TextChannel,
 } from "discord.js";
 import { getDb } from "../db.js";
@@ -58,11 +58,10 @@ export class VerificationModule {
         const authUrl = this.buildAuthUrl(member.user.id);
 
         const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-          new LinkButtonBuilder()
+          new ButtonBuilder()
             .setURL(authUrl)
             .setLabel("🔗 Authorize Bot")
             .setStyle(ButtonStyle.Link)
-            .setEmoji("🔗"),
         );
 
         const row2 = new ActionRowBuilder<ButtonBuilder>().addComponents(
