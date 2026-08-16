@@ -32,7 +32,7 @@ export class MemberTrackingModule {
     const guildId = member.guild?.id || "";
     getDb().prepare(`
       INSERT INTO members (user_id, guild_id, username, nickname, join_date, roles_json, last_seen, is_active)
-      VALUES (?, ?, ?, ?, ?, datetime('now'), ?)
+      VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?)
       ON CONFLICT(user_id, guild_id) DO UPDATE SET
         username = excluded.username, nickname = excluded.nickname,
         roles_json = excluded.roles_json, last_seen = excluded.last_seen,
