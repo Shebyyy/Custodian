@@ -242,7 +242,7 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
 // ─── Start OAuth2 callback server ───
 try {
   if (globalConfig.oauth2.clientSecret && globalConfig.oauth2.redirectUri) {
-    import("./oauth-callback.js");
+    await import("./oauth-callback.js");
   } else {
     console.log("⚠️ OAuth2 not configured — authorization won't work. Set OAUTH2_CLIENT_SECRET and OAUTH2_REDIRECT_URI in .env");
   }

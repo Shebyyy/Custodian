@@ -32,6 +32,13 @@ jobs:
 
             # Clone or pull
             echo "[2/6] Fetching code..."
+
+            # Save old PID BEFORE git clean wipes it
+            OLD_BOT_PID=""
+            if [ -f /root/Custodian/data/bot.pid ]; then
+              OLD_BOT_PID=$(cat /root/Custodian/data/bot.pid)
+            fi
+
             if [ -d /root/Custodian/.git ]; then
               cd /root/Custodian
               git fetch origin main
@@ -41,6 +48,21 @@ jobs:
               rm -rf /root/Custodian
               git clone -b main https://github.com/${{ github.repository }}.git /root/Custodian
             fi
+
+            # Kill old process using saved PID (if it's still alive)
+            if [ -n "$OLD_BOT_PID" ] && kill -0 "$OLD_BOT_PID" 2>/dev/null; then
+              kill -9 "$OLD_BOT_PID" 2>/dev/null || true
+              echo "Stopped old process (PID: $OLD_BOT_PID)"
+              sleep 2
+            fi
+
+            # Safety net: kill anything still holding port 4000 (OAuth callback)
+            if command -v fuser &>/dev/null; then
+              fuser -k 4000/tcp 2>/dev/null || true
+            elif command -v lsof &>/dev/null; then
+              lsof -ti:4000 | xargs kill -9 2>/dev/null || true
+            fi
+
             echo "OK: code fetched"
 
             # Install deps

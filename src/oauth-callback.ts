@@ -9,54 +9,66 @@ import { exchangeCode, storeOAuthToken, truncate } from "./utils.js";
  * Runs on port 4000 alongside the Discord bot.
  */
 
-const CALLBACK_PORT = 4000;
+const CALLBACK_PORT = parseInt(process.env.OAUTH_CALLBACK_PORT || "4000", 10);
 
-const server = Bun.serve({
-  port: CALLBACK_PORT,
-  async fetch(req: Request): Promise<Response> {
-    const url = new URL(req.url);
+let server: any;
 
-    // Health check
-    if (url.pathname === "/health") {
-      return new Response("OK", { status: 200 });
-    }
+try {
+  server = Bun.serve({
+    port: CALLBACK_PORT,
+    async fetch(req: Request): Promise<Response> {
+      const url = new URL(req.url);
 
-    // OAuth2 callback — Discord redirects here after user authorizes
-    if (url.pathname === "/oauth/callback") {
-      const code = url.searchParams.get("code");
-      const state = url.searchParams.get("state"); // state = userId
-
-      if (!code || !state) {
-        return new Response("❌ Missing code or state parameter.", { status: 400 });
+      // Health check
+      if (url.pathname === "/health") {
+        return new Response("OK", { status: 200 });
       }
 
-      try {
-        // Exchange code for access token
-        const tokens = await exchangeCode(code);
+      // OAuth2 callback — Discord redirects here after user authorizes
+      if (url.pathname === "/oauth/callback") {
+        const code = url.searchParams.get("code");
+        const state = url.searchParams.get("state"); // state = userId
 
-        // Store in database
-        storeOAuthToken(state, tokens.access_token, tokens.refresh_token, tokens.expires_in, tokens.scope);
+        if (!code || !state) {
+          return new Response("❌ Missing code or state parameter.", { status: 400 });
+        }
 
-        console.log(`✅ OAuth2 token stored for user ${state}`);
+        try {
+          // Exchange code for access token
+          const tokens = await exchangeCode(code);
 
-        return new Response(
-          `✅ Authorized! You can close this tab now.\n\nCustodian can now add you to servers when needed. Go back to Discord.`,
-          { status: 200, headers: { "Content-Type": "text/plain; charset=utf-8" } }
-        );
-      } catch (err: any) {
-        console.error(`❌ OAuth2 callback error for ${state}:`, err.message);
-        return new Response(
-          `❌ Authorization failed: ${truncate(err.message, 200)}\n\nTry again or contact an admin.`,
-          { status: 500, headers: { "Content-Type": "text/plain; charset=utf-8" } }
-        );
+          // Store in database
+          storeOAuthToken(state, tokens.access_token, tokens.refresh_token, tokens.expires_in, tokens.scope);
+
+          console.log(`✅ OAuth2 token stored for user ${state}`);
+
+          return new Response(
+            `✅ Authorized! You can close this tab now.\n\nCustodian can now add you to servers when needed. Go back to Discord.`,
+            { status: 200, headers: { "Content-Type": "text/plain; charset=utf-8" } }
+          );
+        } catch (err: any) {
+          console.error(`❌ OAuth2 callback error for ${state}:`, err.message);
+          return new Response(
+            `❌ Authorization failed: ${truncate(err.message, 200)}\n\nTry again or contact an admin.`,
+            { status: 500, headers: { "Content-Type": "text/plain; charset=utf-8" } }
+          );
+        }
       }
-    }
 
-    // 404 for everything else
-    return new Response("Not Found", { status: 404 });
-  },
-});
+      // 404 for everything else
+      return new Response("Not Found", { status: 404 });
+    },
+  });
 
-console.log(`🌐 OAuth2 callback server running on port ${CALLBACK_PORT}`);
+  console.log(`🌐 OAuth2 callback server running on port ${CALLBACK_PORT}`);
+} catch (err: any) {
+  if (err.code === "EADDRINUSE") {
+    console.error(`❌ OAuth2 callback server failed — port ${CALLBACK_PORT} is already in use.`);
+    console.error("   Another instance of the bot may be running. Kill it and try again.");
+    // Don't crash the whole bot — just skip the OAuth server
+  } else {
+    console.error(`❌ OAuth2 callback server failed: ${err.message}`);
+  }
+}
 
 export { server, CALLBACK_PORT };
