@@ -140,6 +140,7 @@ export class VerificationModule {
       for (const q of config.quiz.questions) {
         answers[q.id - 1] = interaction.fields.getTextInputValue(`q_${q.id}`).trim();
       }
+      console.log(`[Quiz] User ${userId} answers:`, JSON.stringify(answers), "Questions:", JSON.stringify(config.quiz.questions.map(q => ({id:q.id, correct:q.correctAnswer, options:q.options}))));
 
       await interaction.reply({ content: "✅ All answers submitted! Grading...", ephemeral: true });
       setTimeout(() => this.grade(userId, guildId, interaction, answers, interaction.channelId), 500);
