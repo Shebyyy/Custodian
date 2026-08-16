@@ -54,9 +54,10 @@ jobs:
             fi
             echo "OK: code fetched"
 
-            # Install deps
+            # Install deps (clean node_modules to force native recompile)
             echo "[4/8] Installing dependencies..."
             cd /root/Custodian
+            rm -rf node_modules
             bun install
             echo "OK: deps installed"
 
