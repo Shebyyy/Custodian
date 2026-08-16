@@ -142,8 +142,8 @@ export function getGuildConfig(guildId: string): GuildConfig {
     } else {
       // New format: object with questions + finalQuestion
       quizData = {
-        questions: parsed.questions || defaultQuestions,
-        finalQuestion: parsed.finalQuestion || null,
+        questions: parsed.questions?.length ? parsed.questions : defaultQuestions,
+        finalQuestion: parsed.finalQuestion || defaultFinalQuestion,
       };
     }
   } else {
