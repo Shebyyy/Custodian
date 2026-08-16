@@ -88,8 +88,13 @@ client.once(Events.ClientReady, async () => {
   }
 
   try {
-    await client.application?.commands.set(commands as any);
-    console.log(`📝 ${commands.length} slash commands registered`);
+    // Register commands per-guild (instant update, no 1hr cache)
+    for (const [id, guild] of client.guilds.cache) {
+      await guild.commands.set(commands as any);
+      console.log(`📝 ${commands.length} slash commands registered in ${guild.name}`);
+    }
+    // Clear stale global commands so they don't linger
+    await client.application?.commands.set([]);
   } catch (err) {
     console.error("Failed to register commands:", err);
   }
