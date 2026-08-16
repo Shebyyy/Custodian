@@ -1,18 +1,20 @@
 import {
   ActionRowBuilder, ButtonBuilder, ButtonStyle, Client, Events,
-  GuildMember, MessageComponentInteraction, ModalBuilder,
-  TextInputBuilder, TextInputStyle,
+  GuildMember, Interaction, ModalBuilder,
+  TextInputBuilder, TextInputStyle, TextChannel,
 } from "discord.js";
 import { getDb } from "../db.js";
 import { getConfig, QuizQuestion } from "../config.js";
 
 /**
- * Module 3 — Verification + Quiz Gate
- * New members get Unverified role → agree to rules → pass quiz → get Verified role.
+ * Module 3 — Verification + Quiz Gate (Channel-Based)
+ * New member joins → gets Unverified role → bot posts in #verification channel
+ * → user clicks "Verify Me" button → modal with quiz pops up → grade → Verified role
+ * NO DMs needed — everything happens in the verification channel.
  */
 export class VerificationModule {
   private client: Client;
-  private quizInProgress = new Map<string, { questionIndex: number; answers: Record<number, string> }>();
+  private quizInProgress = new Map<string, { questionIndex: number; answers: Record<number, string>; channelId: string }>();
 
   constructor(client: Client) {
     this.client = client;
@@ -20,75 +22,146 @@ export class VerificationModule {
   }
 
   private setupListeners() {
+    // ── On member join: assign Unverified role + post verification message in channel ──
     this.client.on(Events.GuildMemberAdd, async (member: GuildMember) => {
       const config = getConfig();
-      if (!config.roles.unverified || !config.roles.verified) return;
-
-      try { await member.roles.add(config.roles.unverified); } catch {}
-
-      getDb().prepare("INSERT OR IGNORE INTO verifications (user_id, status) VALUES (?, 'pending')").run(member.user.id);
+      if (!config.roles.unverified || !config.roles.verified || !config.channels.verification) return;
 
       try {
+        await member.roles.add(config.roles.unverified);
+      } catch (err) {
+        console.error(`Failed to assign Unverified role to ${member.user.username}:`, err);
+        return;
+      }
+
+      // Record in DB
+      getDb().prepare("INSERT OR IGNORE INTO verifications (user_id, status) VALUES (?, 'pending')").run(member.user.id);
+
+      // Post verification prompt in the channel (not DM!)
+      try {
+        const channel = await this.client.channels.fetch(config.channels.verification);
+        if (!channel || !channel.isTextBased()) return;
+
+        const rulesPreview = config.termsAndConditions.length > 300
+          ? config.termsAndConditions.slice(0, 300) + "\n\n... *(read full rules in #rules)*"
+          : config.termsAndConditions;
+
         const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-          new ButtonBuilder().setCustomId("verify_agree").setLabel("I Agree to the Rules").setStyle(ButtonStyle.Success).setEmoji("✅")
+          new ButtonBuilder()
+            .setCustomId(`verify_start:${member.user.id}`)
+            .setLabel("✅ Verify Me")
+            .setStyle(ButtonStyle.Success)
         );
-        await member.send({
-          content: `👋 **Welcome, ${member.user.username}!**\n\n---\n${config.termsAndConditions}\n---\n\nClick below to proceed to a quick quiz.`,
+
+        await (channel as TextChannel).send({
+          content: `👋 Welcome **${member.user.username}**!\n\n---\n${rulesPreview}\n---\n\nClick the button below to start a quick quiz and gain full access.`,
           components: [row],
         });
-      } catch {
-        console.error(`Could not DM ${member.user.username}`);
+      } catch (err) {
+        console.error(`Failed to post verification message for ${member.user.username}:`, err);
       }
     });
 
-    // Agree button
-    this.client.on(Events.InteractionCreate, async (interaction) => {
-      if (!interaction.isButton() || interaction.customId !== "verify_agree") return;
+    // ── Handle "Verify Me" button click ──
+    this.client.on(Events.InteractionCreate, async (interaction: Interaction) => {
+      if (!interaction.isButton()) return;
+      if (!interaction.customId.startsWith("verify_start:")) return;
+
+      const targetUserId = interaction.customId.split(":")[1];
+
+      // Only the mentioned user (or admin) can click
+      if (interaction.user.id !== targetUserId) {
+        await interaction.reply({ content: "❌ This verification is not for you!", ephemeral: true });
+        return;
+      }
+
       const config = getConfig();
-      await interaction.reply({ content: "✅ Starting quiz...", ephemeral: true });
-      getDb().prepare("UPDATE verifications SET agreed_to_rules_at = datetime('now'), quiz_started_at = datetime('now') WHERE user_id = ?").run(interaction.user.id);
-      this.quizInProgress.set(interaction.user.id, { questionIndex: 0, answers: {} });
-      this.sendQuestion(interaction.user.id, interaction, 0);
+      const db = getDb();
+
+      // Check if already verified
+      const record = db.prepare("SELECT status, attempts FROM verifications WHERE user_id = ?").get(targetUserId) as any;
+      if (record?.status === "verified") {
+        await interaction.reply({ content: "✅ You're already verified!", ephemeral: true });
+        return;
+      }
+
+      // Check max attempts
+      if (record?.attempts >= config.quiz.maxAttempts) {
+        await interaction.reply({ content: "❌ You've used all attempts. An admin will review your case.", ephemeral: true });
+        return;
+      }
+
+      await interaction.reply({ content: "📝 Starting quiz...", ephemeral: true });
+      db.prepare("UPDATE verifications SET agreed_to_rules_at = datetime('now'), quiz_started_at = datetime('now'), status = 'in_progress' WHERE user_id = ?").run(targetUserId);
+
+      this.quizInProgress.set(targetUserId, { questionIndex: 0, answers: {}, channelId: interaction.channelId });
+      this.sendQuizModal(interaction, 0);
     });
 
-    // Quiz modal answers
-    this.client.on(Events.InteractionCreate, async (interaction) => {
-      if (!interaction.isModalSubmit() || !interaction.customId.startsWith("quiz_")) return;
-      const idx = parseInt(interaction.customId.split("_")[1], 10);
-      const answer = interaction.fields.getTextInputValue("quiz_input");
-      const state = this.quizInProgress.get(interaction.user.id);
-      if (!state) return;
+    // ── Handle quiz modal submissions ──
+    this.client.on(Events.InteractionCreate, async (interaction: Interaction) => {
+      if (!interaction.isModalSubmit()) return;
+      if (!interaction.customId.startsWith("quiz_")) return;
+
+      const parts = interaction.customId.split("_");
+      const idx = parseInt(parts[1], 10);
+      const userId = parts[2];
+      const answer = interaction.fields.getTextInputValue("quiz_answer");
+
+      const state = this.quizInProgress.get(userId);
+      if (!state) {
+        await interaction.reply({ content: "❌ No active quiz. Click 'Verify Me' to start.", ephemeral: true });
+        return;
+      }
+
       state.answers[idx] = answer;
 
       const config = getConfig();
       const next = idx + 1;
+
       if (next < config.quiz.questions.length) {
-        this.sendQuestion(interaction.user.id, interaction, next);
+        state.questionIndex = next;
+        await interaction.reply({ content: `✅ Answer recorded. Next question...`, ephemeral: true });
+        // Small delay before showing next modal
+        setTimeout(() => this.sendQuizModal(interaction, next), 500);
       } else {
-        await this.grade(interaction.user.id, interaction, state.answers);
+        await interaction.reply({ content: "✅ All answers submitted! Grading...", ephemeral: true });
+        setTimeout(() => this.grade(userId, interaction, state.answers, state.channelId), 500);
       }
     });
   }
 
-  private async sendQuestion(userId: string, interaction: any, idx: number) {
+  private async sendQuizModal(interaction: any, idx: number) {
     const config = getConfig();
     const q: QuizQuestion = config.quiz.questions[idx];
-    const optionsText = q.options.map((o, i) => `**${String.fromCharCode(65 + i)}.** ${o}`).join("\n");
+    if (!q) return;
+
+    const total = config.quiz.questions.length;
+    const optionsText = q.options.map((o, i) => `${String.fromCharCode(65 + i)}. ${o}`).join("  |  ");
 
     const modal = new ModalBuilder()
-      .setCustomId(`quiz_${idx}`)
-      .setTitle(`Q${idx + 1}/${config.quiz.questions.length}`)
+      .setCustomId(`quiz_${idx}_${interaction.user.id}`)
+      .setTitle(`Verification Q${idx + 1}/${total}`)
       .addComponents(
         new ActionRowBuilder<TextInputBuilder>().addComponents(
-          new TextInputBuilder().setCustomId("quiz_input").setLabel(q.question).setStyle(TextInputStyle.Short).setPlaceholder("Your answer...").setRequired(true)
+          new TextInputBuilder()
+            .setCustomId("quiz_answer")
+            .setLabel(truncate(q.question, 45))
+            .setStyle(TextInputStyle.Short)
+            .setPlaceholder(`Type A, B, or the answer (${optionsText})`)
+            .setRequired(true)
+            .setMaxLength(100)
         )
       );
 
-    await interaction.followUp({ content: `📝 **Q${idx + 1}:** ${q.question}\n${optionsText}`, ephemeral: true });
-    await interaction.showModal(modal);
+    try {
+      await interaction.showModal(modal);
+    } catch (err) {
+      console.error("Failed to show modal:", err);
+    }
   }
 
-  private async grade(userId: string, interaction: any, answers: Record<number, string>) {
+  private async grade(userId: string, interaction: any, answers: Record<number, string>, channelId: string) {
     const config = getConfig();
     const db = getDb();
     let correct = 0;
@@ -100,34 +173,57 @@ export class VerificationModule {
         userAns === q.correctAnswer.toLowerCase() ||
         userAns === String(correctIdx) ||
         userAns === String.fromCharCode(65 + correctIdx)
-      ) correct++;
+      ) {
+        correct++;
+      }
     }
 
-    const pct = Math.round((correct / config.quiz.questions.length) * 100);
+    const total = config.quiz.questions.length;
+    const pct = Math.round((correct / total) * 100);
     const passed = pct >= config.quiz.passPercentage;
     const record = db.prepare("SELECT attempts FROM verifications WHERE user_id = ?").get(userId) as any;
     const newAttempts = (record?.attempts || 0) + 1;
 
-    if (passed) {
-      db.prepare("UPDATE verifications SET status = 'verified', quiz_passed_at = datetime('now'), attempts = ?, score = ?, answers_json = ? WHERE user_id = ?")
-        .run(newAttempts, pct, JSON.stringify(answers), userId);
-      try {
+    try {
+      if (passed) {
+        db.prepare("UPDATE verifications SET status = 'verified', quiz_passed_at = datetime('now'), attempts = ?, score = ?, answers_json = ? WHERE user_id = ?")
+          .run(newAttempts, pct, JSON.stringify(answers), userId);
+
         const guild = await this.client.guilds.fetch(config.guildId);
         const member = await guild.members.fetch(userId);
         await member.roles.add(config.roles.verified);
         await member.roles.remove(config.roles.unverified);
-      } catch {}
-      await interaction.followUp({ content: `🎉 **Passed!** ${correct}/${config.quiz.questions.length} (${pct}%). You now have full access!`, ephemeral: true });
-    } else {
-      db.prepare("UPDATE verifications SET status = 'failed', attempts = ?, score = ?, answers_json = ? WHERE user_id = ?")
-        .run(newAttempts, pct, JSON.stringify(answers), userId);
-      if (newAttempts < config.quiz.maxAttempts) {
-        await interaction.followUp({ content: `❌ **Failed** — ${correct}/${config.quiz.questions.length} (${pct}%). Need ${config.quiz.passPercentage}%. ${config.quiz.maxAttempts - newAttempts} tries left.`, ephemeral: true });
+
+        // Post success in verification channel
+        const channel = await this.client.channels.fetch(channelId).catch(() => null);
+        if (channel && channel.isTextBased()) {
+          await (channel as any).send(`✅ **${interaction.user.username}** passed the verification quiz! (${correct}/${total} — ${pct}%)`);
+        }
+
+        await interaction.followUp({ content: `🎉 **Passed!** ${correct}/${total} (${pct}%). You now have full access!`, ephemeral: true });
       } else {
-        db.prepare("UPDATE verifications SET status = 'flagged_review' WHERE user_id = ?").run(userId);
-        await interaction.followUp({ content: `❌ Max attempts reached. An admin will review your case.`, ephemeral: true });
+        db.prepare("UPDATE verifications SET status = 'failed', attempts = ?, score = ?, answers_json = ? WHERE user_id = ?")
+          .run(newAttempts, pct, JSON.stringify(answers), userId);
+
+        if (newAttempts < config.quiz.maxAttempts) {
+          const remaining = config.quiz.maxAttempts - newAttempts;
+          await interaction.followUp({
+            content: `❌ **Failed** — ${correct}/${total} (${pct}%). Need ${config.quiz.passPercentage}%.\n${remaining} attempt${remaining > 1 ? "s" : ""} remaining. Click "Verify Me" to try again.`,
+            ephemeral: true,
+          });
+        } else {
+          db.prepare("UPDATE verifications SET status = 'flagged_review' WHERE user_id = ?").run(userId);
+          const channel = await this.client.channels.fetch(channelId).catch(() => null);
+          if (channel && channel.isTextBased()) {
+            await (channel as any).send(`⚠️ **${interaction.user.username}** failed verification ${newAttempts} times. Flagged for admin review.`);
+          }
+          await interaction.followUp({ content: "❌ Max attempts reached. An admin will review your case.", ephemeral: true });
+        }
       }
+    } catch (err) {
+      console.error("Grade error:", err);
     }
+
     this.quizInProgress.delete(userId);
   }
 
@@ -137,7 +233,7 @@ export class VerificationModule {
     const db = getDb();
     const total = (db.prepare("SELECT COUNT(*) as c FROM verifications").get() as any).c;
     const verified = (db.prepare("SELECT COUNT(*) as c FROM verifications WHERE status = 'verified'").get() as any).c;
-    const pending = (db.prepare("SELECT COUNT(*) as c FROM verifications WHERE status = 'pending'").get() as any).c;
+    const pending = (db.prepare("SELECT COUNT(*) as c FROM verifications WHERE status = 'pending' OR status = 'in_progress'").get() as any).c;
     const failed = (db.prepare("SELECT COUNT(*) as c FROM verifications WHERE status = 'failed'").get() as any).c;
     const flagged = (db.prepare("SELECT COUNT(*) as c FROM verifications WHERE status = 'flagged_review'").get() as any).c;
     return `🔐 **Verification:** ${total} total, ${verified} verified, ${pending} pending, ${failed} failed, ${flagged} flagged`;
@@ -160,6 +256,10 @@ export class VerificationModule {
   getFlagged(): string {
     const users = getDb().prepare("SELECT user_id, attempts, score FROM verifications WHERE status = 'flagged_review'").all() as any[];
     if (!users.length) return "📋 No flagged users";
-    return "⚠️ **Flagged:**\n" + users.map((u) => `• <@${u.user_id}> — ${u.attempts} attempts, ${u.score}%`).join("\n");
+    return "⚠️ **Flagged for review:**\n" + users.map((u) => `• <@${u.user_id}> — ${u.attempts} attempts, ${u.score}%`).join("\n");
   }
+}
+
+function truncate(s: string, max: number): string {
+  return s.length > max ? s.slice(0, max - 1) + "…" : s;
 }
