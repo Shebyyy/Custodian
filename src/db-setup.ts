@@ -49,6 +49,15 @@ migrateAddColumn("messages", "guild_id", "TEXT");
 // members: add guild_id
 migrateAddColumn("members", "guild_id", "TEXT");
 
+// verifications: add guild_id
+migrateAddColumn("verifications", "guild_id", "TEXT");
+
+// restore_runs: add guild_id
+migrateAddColumn("restore_runs", "guild_id", "TEXT");
+
+// channel_mappings: add guild_id
+migrateAddColumn("channel_mappings", "guild_id", "TEXT");
+
 // Drop old single-column unique indexes and recreate as composite (user_id, guild_id)
 try {
   const memberIdxs = db.prepare("PRAGMA index_list(members)").all() as any[];
