@@ -65,9 +65,9 @@ export class ChannelBackupModule {
     const attachments = msg.attachments.map((a) => ({ url: a.url, name: a.name, size: a.size }));
     const reactions = msg.reactions.cache.map((r) => ({ emoji: r.emoji.name, count: r.count }));
     getDb().prepare(`
-      INSERT OR REPLACE INTO messages (message_id, channel_id, author_id, author_username, content, attachments_json, timestamp, reactions_json, reply_to_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(msg.id, msg.channelId, msg.author.id, msg.author.username, msg.content || "", JSON.stringify(attachments), msg.createdAt.toISOString(), JSON.stringify(reactions), msg.reference?.messageId || null);
+      INSERT OR REPLACE INTO messages (message_id, channel_id, guild_id, author_id, author_username, content, attachments_json, timestamp, reactions_json, reply_to_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(msg.id, msg.channelId, msg.guild?.id || "", msg.author.id, msg.author.username, msg.content || "", JSON.stringify(attachments), msg.createdAt.toISOString(), JSON.stringify(reactions), msg.reference?.messageId || null);
   }
 
   private updateReactions(msg: Message) {
@@ -81,9 +81,9 @@ export class ChannelBackupModule {
 
   // ─── Commands ───
 
-  addChannel(channelId: string, channelName: string): string {
+  addChannel(channelId: string, channelName: string, guildId?: string): string {
     try {
-      getDb().prepare("INSERT INTO backup_channels (channel_id, channel_name) VALUES (?, ?)").run(channelId, channelName);
+      getDb().prepare("INSERT INTO backup_channels (channel_id, guild_id, channel_name) VALUES (?, ?, ?)").run(channelId, guildId || "", channelName);
       return `✅ Now backing up <#${channelId}>`;
     } catch {
       return `⚠️ <#${channelId}> is already being backed up`;

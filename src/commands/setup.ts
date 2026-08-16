@@ -4,47 +4,37 @@ import {
   Client, CommandInteraction, Interaction,
   ModalBuilder, TextInputBuilder, TextInputStyle,
 } from "discord.js";
-import { getConfig, saveConfig, saveGuildId } from "../config.js";
+import { getGuildConfig, saveGuildConfig, getGlobalConfig } from "../config.js";
 
 /**
- * /setup — One-shot setup via modal form(s).
- * Admin types /setup → modal popup → fill in IDs → save. Done.
+ * /setup — One-shot per-guild setup via modal form(s).
+ * Each server has its own config stored in DB.
  *
- * Discord modals support max 5 text inputs per modal,
- * so we use 2 modals: Modal 1 = roles + welcome, Modal 2 = channels + quiz.
+ * Modal 1: Roles + Welcome/Rules channels (5 fields)
+ * Modal 2: Verification channel + quiz settings (5 fields)
  */
 
 export function getSetupCommands() {
   return [
-    {
-      name: "setup" as const,
-      description: "Configure Custodian (admin only)",
-    },
+    { name: "setup" as const, description: "Configure Custodian for this server (admin only)" },
   ];
 }
 
 export async function handleSetupCommand(interaction: CommandInteraction, client: Client): Promise<void> {
-  const config = getConfig();
-
   // Find the guild
-  const guilds = client.guilds.cache;
-  if (!guilds.size) {
-    await interaction.reply({ content: "❌ I'm not in any server! Invite me first.", ephemeral: true });
+  const guild = interaction.guild;
+  if (!guild) {
+    await interaction.reply({ content: "❌ Run this command in a server.", ephemeral: true });
     return;
   }
-  const guild = guilds.first()!;
 
-  // Store client ID from the bot user
-  if (client.user && !config.clientId) {
-    saveConfig({ clientId: client.user.id });
-  }
+  const existingConfig = getGuildConfig(guild.id);
 
-  // Show first modal: Roles + Welcome Channel (5 fields max)
+  // Show first modal: Roles + Channels (5 fields)
   const modal = new ModalBuilder()
-    .setCustomId("setup_modal_1")
+    .setCustomId(`setup_modal_1:${guild.id}`)
     .setTitle("⚙️ Custodian Setup — Roles & Channels")
     .addComponents(
-      // Field 1: Unverified Role ID
       new ActionRowBuilder<TextInputBuilder>().addComponents(
         new TextInputBuilder()
           .setCustomId("role_unverified")
@@ -53,9 +43,8 @@ export async function handleSetupCommand(interaction: CommandInteraction, client
           .setPlaceholder("e.g. 123456789012345678")
           .setRequired(true)
           .setMaxLength(25)
-          .setValue(config.roles.unverified || "")
+          .setValue(existingConfig.roles.unverified || "")
       ),
-      // Field 2: Verified Role ID
       new ActionRowBuilder<TextInputBuilder>().addComponents(
         new TextInputBuilder()
           .setCustomId("role_verified")
@@ -64,9 +53,8 @@ export async function handleSetupCommand(interaction: CommandInteraction, client
           .setPlaceholder("e.g. 123456789012345678")
           .setRequired(true)
           .setMaxLength(25)
-          .setValue(config.roles.verified || "")
+          .setValue(existingConfig.roles.verified || "")
       ),
-      // Field 3: Admin Role ID
       new ActionRowBuilder<TextInputBuilder>().addComponents(
         new TextInputBuilder()
           .setCustomId("role_admin")
@@ -75,9 +63,8 @@ export async function handleSetupCommand(interaction: CommandInteraction, client
           .setPlaceholder("e.g. 123456789012345678")
           .setRequired(true)
           .setMaxLength(25)
-          .setValue(config.roles.admin || "")
+          .setValue(existingConfig.roles.admin || "")
       ),
-      // Field 4: Welcome Channel ID
       new ActionRowBuilder<TextInputBuilder>().addComponents(
         new TextInputBuilder()
           .setCustomId("channel_welcome")
@@ -86,9 +73,8 @@ export async function handleSetupCommand(interaction: CommandInteraction, client
           .setPlaceholder("e.g. 123456789012345678")
           .setRequired(true)
           .setMaxLength(25)
-          .setValue(config.channels.welcome || "")
+          .setValue(existingConfig.channels.welcome || "")
       ),
-      // Field 5: Rules Channel ID
       new ActionRowBuilder<TextInputBuilder>().addComponents(
         new TextInputBuilder()
           .setCustomId("channel_rules")
@@ -97,24 +83,21 @@ export async function handleSetupCommand(interaction: CommandInteraction, client
           .setPlaceholder("e.g. 123456789012345678")
           .setRequired(true)
           .setMaxLength(25)
-          .setValue(config.channels.rules || "")
+          .setValue(existingConfig.channels.rules || "")
       ),
     );
-
-  // Save guild ID
-  saveGuildId(guild.id);
 
   await interaction.showModal(modal);
 }
 
 export async function handleSetupInteraction(interaction: Interaction, client: Client): Promise<boolean> {
-  // Handle Modal 1 submission (roles + welcome + rules)
-  if (interaction.isModalSubmit() && interaction.customId === "setup_modal_1") {
+  if (!interaction.isModalSubmit()) return false;
+
+  if (interaction.customId.startsWith("setup_modal_1:")) {
     return await handleModal1(interaction, client) || true;
   }
 
-  // Handle Modal 2 submission (verification channel + quiz)
-  if (interaction.isModalSubmit() && interaction.customId === "setup_modal_2") {
+  if (interaction.customId.startsWith("setup_modal_2:")) {
     return await handleModal2(interaction) || true;
   }
 
@@ -122,44 +105,39 @@ export async function handleSetupInteraction(interaction: Interaction, client: C
 }
 
 async function handleModal1(interaction: any, client: Client): Promise<boolean> {
+  const guildId = interaction.customId.split(":")[1];
   const roleUnverified = interaction.fields.getTextInputValue("role_unverified").trim();
   const roleVerified = interaction.fields.getTextInputValue("role_verified").trim();
   const roleAdmin = interaction.fields.getTextInputValue("role_admin").trim();
   const channelWelcome = interaction.fields.getTextInputValue("channel_welcome").trim();
   const channelRules = interaction.fields.getTextInputValue("channel_rules").trim();
 
-  // Validate — basic check that they look like Discord IDs (numeric)
   const idRegex = /^\d{17,20}$/;
   for (const [name, val] of [
-    ["Unverified Role", roleUnverified],
-    ["Verified Role", roleVerified],
-    ["Admin Role", roleAdmin],
-    ["Welcome Channel", channelWelcome],
-    ["Rules Channel", channelRules],
+    ["Unverified Role", roleUnverified], ["Verified Role", roleVerified],
+    ["Admin Role", roleAdmin], ["Welcome Channel", channelWelcome], ["Rules Channel", channelRules],
   ]) {
     if (!idRegex.test(val)) {
       await interaction.reply({
-        content: `❌ "${name}" doesn't look like a valid Discord ID. It should be a 17-20 digit number like \`123456789012345678\`.\n\nRun /setup again.`,
+        content: `❌ "${name}" is not a valid Discord ID (should be 17-20 digits). Run /setup again.`,
         ephemeral: true,
       });
       return true;
     }
   }
 
-  // Temporarily save modal 1 values — we'll store them in a map and show modal 2
-  // Use a simple map keyed by user+guild for safety
-  const key = `${interaction.user.id}`;
+  // Store temp data
+  const key = `${interaction.user.id}:${guildId}`;
   if (!(globalThis as any).__setupTemp) (globalThis as any).__setupTemp = new Map();
   (globalThis as any).__setupTemp.set(key, {
     roles: { unverified: roleUnverified, verified: roleVerified, admin: roleAdmin },
     channels: { welcome: channelWelcome, rules: channelRules },
   });
 
-  const config = getConfig();
+  const existingConfig = getGuildConfig(guildId);
 
-  // Show Modal 2: Verification Channel + Quiz Settings (5 fields)
   const modal2 = new ModalBuilder()
-    .setCustomId("setup_modal_2")
+    .setCustomId(`setup_modal_2:${guildId}`)
     .setTitle("⚙️ Setup — Verification & Quiz")
     .addComponents(
       new ActionRowBuilder<TextInputBuilder>().addComponents(
@@ -170,47 +148,47 @@ async function handleModal1(interaction: any, client: Client): Promise<boolean> 
           .setPlaceholder("e.g. 123456789012345678")
           .setRequired(true)
           .setMaxLength(25)
-          .setValue(config.channels.verification || "")
+          .setValue(existingConfig.channels.verification || "")
       ),
       new ActionRowBuilder<TextInputBuilder>().addComponents(
         new TextInputBuilder()
           .setCustomId("quiz_pass_percentage")
-          .setLabel("Quiz Pass Percentage (e.g. 80)")
+          .setLabel("Quiz Pass Percentage (1-100)")
           .setStyle(TextInputStyle.Short)
           .setPlaceholder("80")
           .setRequired(true)
           .setMaxLength(3)
-          .setValue(String(config.quiz.passPercentage))
+          .setValue(String(existingConfig.quiz.passPercentage))
       ),
       new ActionRowBuilder<TextInputBuilder>().addComponents(
         new TextInputBuilder()
           .setCustomId("quiz_max_attempts")
-          .setLabel("Max Quiz Attempts (e.g. 3)")
+          .setLabel("Max Quiz Attempts (1-10)")
           .setStyle(TextInputStyle.Short)
           .setPlaceholder("3")
           .setRequired(true)
           .setMaxLength(2)
-          .setValue(String(config.quiz.maxAttempts))
+          .setValue(String(existingConfig.quiz.maxAttempts))
       ),
       new ActionRowBuilder<TextInputBuilder>().addComponents(
         new TextInputBuilder()
           .setCustomId("oauth2_client_secret")
-          .setLabel("OAuth2 Client Secret (from Dev Portal)")
+          .setLabel("OAuth2 Client Secret (blank = keep current)")
           .setStyle(TextInputStyle.Short)
           .setPlaceholder("Leave empty to keep current")
           .setRequired(false)
           .setMaxLength(60)
-          .setValue(config.oauth2.clientSecret || "")
+          .setValue(getGlobalConfig().oauth2.clientSecret || "")
       ),
       new ActionRowBuilder<TextInputBuilder>().addComponents(
         new TextInputBuilder()
           .setCustomId("oauth2_redirect_uri")
-          .setLabel("OAuth2 Redirect URI")
+          .setLabel("OAuth2 Redirect URI (blank = keep current)")
           .setStyle(TextInputStyle.Short)
           .setPlaceholder("https://your-domain.com/oauth/callback")
           .setRequired(false)
           .setMaxLength(200)
-          .setValue(config.oauth2.redirectUri || "")
+          .setValue(getGlobalConfig().oauth2.redirectUri || "")
       ),
     );
 
@@ -219,23 +197,18 @@ async function handleModal1(interaction: any, client: Client): Promise<boolean> 
 }
 
 async function handleModal2(interaction: any): Promise<boolean> {
+  const guildId = interaction.customId.split(":")[1];
   const channelVerification = interaction.fields.getTextInputValue("channel_verification").trim();
   const quizPassPct = parseInt(interaction.fields.getTextInputValue("quiz_pass_percentage").trim(), 10);
   const quizMaxAttempts = parseInt(interaction.fields.getTextInputValue("quiz_max_attempts").trim(), 10);
   const oauth2Secret = interaction.fields.getTextInputValue("oauth2_client_secret").trim();
   const oauth2Redirect = interaction.fields.getTextInputValue("oauth2_redirect_uri").trim();
 
-  // Validate verification channel ID
   const idRegex = /^\d{17,20}$/;
   if (!idRegex.test(channelVerification)) {
-    await interaction.reply({
-      content: `❌ "Verification Channel ID" doesn't look like a valid Discord ID. Run /setup again.`,
-      ephemeral: true,
-    });
+    await interaction.reply({ content: "❌ Verification Channel ID is not valid. Run /setup again.", ephemeral: true });
     return true;
   }
-
-  // Validate quiz settings
   if (isNaN(quizPassPct) || quizPassPct < 1 || quizPassPct > 100) {
     await interaction.reply({ content: "❌ Pass percentage must be 1-100. Run /setup again.", ephemeral: true });
     return true;
@@ -245,70 +218,85 @@ async function handleModal2(interaction: any): Promise<boolean> {
     return true;
   }
 
-  // Retrieve modal 1 temp data
-  const key = `${interaction.user.id}`;
+  const key = `${interaction.user.id}:${guildId}`;
   const temp = (globalThis as any).__setupTemp?.get(key);
   if (!temp) {
     await interaction.reply({ content: "❌ Setup session expired. Run /setup again.", ephemeral: true });
     return true;
   }
 
-  // Merge and save everything
-  const config = getConfig();
-  const defaultQuiz = [
-    { id: 1, question: "Is it okay to spam?", type: "yes_no", options: ["Yes", "No"], correctAnswer: "No" },
-    { id: 2, question: "Be respectful to everyone?", type: "yes_no", options: ["Yes", "No"], correctAnswer: "Yes" },
-    { id: 3, question: "NSFW allowed?", type: "yes_no", options: ["Yes", "No"], correctAnswer: "No" },
-  ];
+  const existingConfig = getGuildConfig(guildId);
 
-  saveConfig({
-    guildId: config.guildId,
+  saveGuildConfig(guildId, {
     roles: temp.roles,
-    channels: {
-      ...temp.channels,
-      verification: channelVerification,
-    },
+    channels: { ...temp.channels, verification: channelVerification },
     quiz: {
       maxAttempts: quizMaxAttempts,
       passPercentage: quizPassPct,
-      questions: config.quiz?.questions?.length ? config.quiz.questions : defaultQuiz,
+      questions: existingConfig.quiz.questions.length ? existingConfig.quiz.questions : existingConfig.quiz.questions,
     },
-    termsAndConditions: "## Server Rules\n\n1. Be respectful to all members.\n2. No spam, self-promotion, or unsolicited DMs.\n3. No NSFW or offensive content.\n4. Follow Discord's Terms of Service.\n5. Listen to staff — their decisions are final.\n6. Use channels for their intended purpose.\n\n**Breaking these rules may result in warnings, kicks, or bans.**",
+    termsAndConditions: existingConfig.termsAndConditions,
   });
 
-  // Save OAuth2 settings separately (only update if provided)
+  // Save OAuth2 globally if changed
   if (oauth2Secret || oauth2Redirect) {
-    saveConfig({
-      oauth2: {
-        clientSecret: oauth2Secret || config.oauth2.clientSecret,
-        redirectUri: oauth2Redirect || config.oauth2.redirectUri,
-      },
-    });
+    const env = loadEnv?.();
+    // Write to .env
+    const { resolve } = await import("path");
+    const { readFileSync, writeFileSync, existsSync } = await import("fs");
+    const envPath = resolve(import.meta.dir, "../.env");
+    const envObj: Record<string, string> = {};
+    if (existsSync(envPath)) {
+      for (const line of readFileSync(envPath, "utf-8").split("\n")) {
+        const t = line.trim();
+        if (!t || t.startsWith("#")) continue;
+        const eq = t.indexOf("=");
+        if (eq === -1) continue;
+        envObj[t.slice(0, eq).trim()] = t.slice(eq + 1).trim();
+      }
+    }
+    if (oauth2Secret) envObj.OAUTH2_CLIENT_SECRET = oauth2Secret;
+    if (oauth2Redirect) envObj.OAUTH2_REDIRECT_URI = oauth2Redirect;
+    writeFileSync(envPath, Object.entries(envObj).map(([k, v]) => `${k}=${v}`).join("\n"));
+
+    // Update in-memory
+    const g = getGlobalConfig();
+    if (oauth2Secret) g.oauth2.clientSecret = oauth2Secret;
+    if (oauth2Redirect) g.oauth2.redirectUri = oauth2Redirect;
   }
 
-  // Clean up temp data
   (globalThis as any).__setupTemp?.delete(key);
 
-  const unvRole = client.guilds.cache.get(config.guildId)?.roles.cache.get(temp.roles.unverified);
-  const verRole = client.guilds.cache.get(config.guildId)?.roles.cache.get(temp.roles.verified);
-  const admRole = client.guilds.cache.get(config.guildId)?.roles.cache.get(temp.roles.admin);
-
   await interaction.reply({
-    content: `🎉 **Custodian Setup Complete!**\n\n` +
-      `**Roles:**\n` +
-      `🔴 Unverified: ${unvRole ? `<@&${temp.roles.unverified}>` : temp.roles.unverified}\n` +
-      `🟢 Verified: ${verRole ? `<@&${temp.roles.verified}>` : temp.roles.verified}\n` +
-      `🛡️ Admin: ${admRole ? `<@&${temp.roles.admin}>` : temp.roles.admin}\n\n` +
-      `**Channels:**\n` +
-      `👋 Welcome: <#${temp.channels.welcome}>\n` +
+    content: `🎉 **Setup Complete for this server!**\n\n` +
+      `**Roles:**\n🔴 Unverified: <@&${temp.roles.unverified}>\n` +
+      `🟢 Verified: <@&${temp.roles.verified}>\n` +
+      `🛡️ Admin: <@&${temp.roles.admin}>\n\n` +
+      `**Channels:**\n👋 Welcome: <#${temp.channels.welcome}>\n` +
       `📜 Rules: <#${temp.channels.rules}>\n` +
       `✅ Verification: <#${channelVerification}>\n\n` +
-      `**Quiz:** ${config.quiz.questions.length} questions, ${quizPassPct}% pass, ${quizMaxAttempts} attempts\n` +
-      `**OAuth2:** ${oauth2Secret ? "✅ configured" : "⚠️ not set — bot authorization won't work"}` +
-      (oauth2Secret && !oauth2Redirect ? `\n⚠️ OAuth2 redirect URI not set — bot authorization won't work` : "") +
-      `\n\n_Saved to config/bot.config.json_`,
+      `**Quiz:** ${existingConfig.quiz.questions.length} questions, ${quizPassPct}% pass, ${quizMaxAttempts} attempts\n` +
+      `**OAuth2:** ${oauth2Secret ? "✅ configured" : "⚠️ not set"}`,
     ephemeral: true,
   });
 
   return true;
+}
+
+// Dynamic import helper
+async function loadEnv() {
+  const { readFileSync, existsSync } = await import("fs");
+  const { resolve } = await import("path");
+  const envPath = resolve(import.meta.dir, "../.env");
+  const env: Record<string, string> = {};
+  if (existsSync(envPath)) {
+    for (const line of readFileSync(envPath, "utf-8").split("\n")) {
+      const t = line.trim();
+      if (!t || t.startsWith("#")) continue;
+      const eq = t.indexOf("=");
+      if (eq === -1) continue;
+      env[t.slice(0, eq).trim()] = t.slice(eq + 1).trim();
+    }
+  }
+  return env;
 }

@@ -10,10 +10,28 @@ mkdirSync(resolve(import.meta.dir, "../data"), { recursive: true });
 const db = new Database(DB_PATH, { create: true });
 db.exec("PRAGMA journal_mode = WAL");
 
+// ─── Per-Guild Config ───
+db.exec(`
+  CREATE TABLE IF NOT EXISTS guild_configs (
+    guild_id TEXT PRIMARY KEY,
+    roles_json TEXT DEFAULT '{}',
+    channels_json TEXT DEFAULT '{}',
+    quiz_json TEXT DEFAULT '{}',
+    terms TEXT DEFAULT '',
+    pass_percentage INTEGER DEFAULT 80,
+    max_attempts INTEGER DEFAULT 3,
+    is_setup INTEGER DEFAULT 0,
+    setup_at TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+`);
+
 // ─── Module 1: Channel Backup ───
 db.exec(`
   CREATE TABLE IF NOT EXISTS backup_channels (
     channel_id TEXT PRIMARY KEY,
+    guild_id TEXT NOT NULL DEFAULT '',
     channel_name TEXT NOT NULL,
     added_at TEXT DEFAULT (datetime('now'))
   );
@@ -22,6 +40,7 @@ db.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     message_id TEXT UNIQUE NOT NULL,
     channel_id TEXT NOT NULL,
+    guild_id TEXT NOT NULL DEFAULT '',
     author_id TEXT NOT NULL,
     author_username TEXT NOT NULL,
     content TEXT NOT NULL DEFAULT '',
@@ -39,6 +58,7 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel_id);
   CREATE INDEX IF NOT EXISTS idx_messages_author ON messages(author_id);
+  CREATE INDEX IF NOT EXISTS idx_messages_guild ON messages(guild_id);
 
   CREATE TABLE IF NOT EXISTS edit_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -51,7 +71,9 @@ db.exec(`
 // ─── Module 2: Member Tracking ───
 db.exec(`
   CREATE TABLE IF NOT EXISTS members (
-    user_id TEXT PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    guild_id TEXT NOT NULL DEFAULT '',
     username TEXT NOT NULL,
     nickname TEXT DEFAULT '',
     join_date TEXT NOT NULL,
@@ -61,13 +83,15 @@ db.exec(`
     is_active INTEGER DEFAULT 1,
     created_at TEXT DEFAULT (datetime('now'))
   );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_members_unique ON members(user_id, guild_id);
 `);
 
-// ─── Module 3: Verification ───
+// ─── Module 3: Verification (per-guild) ───
 db.exec(`
   CREATE TABLE IF NOT EXISTS verifications (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id TEXT UNIQUE NOT NULL,
+    user_id TEXT NOT NULL,
+    guild_id TEXT NOT NULL DEFAULT '',
     status TEXT DEFAULT 'pending',
     agreed_to_rules_at TEXT,
     quiz_started_at TEXT,
@@ -77,12 +101,14 @@ db.exec(`
     answers_json TEXT DEFAULT '[]',
     created_at TEXT DEFAULT (datetime('now'))
   );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_verifications_unique ON verifications(user_id, guild_id);
 `);
 
-// ─── Module 4: Restore ───
+// ─── Module 4: Restore (per-guild) ───
 db.exec(`
   CREATE TABLE IF NOT EXISTS restore_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id TEXT NOT NULL DEFAULT '',
     source_channel_id TEXT NOT NULL,
     target_channel_id TEXT NOT NULL,
     total_messages INTEGER DEFAULT 0,
@@ -95,6 +121,7 @@ db.exec(`
 
   CREATE TABLE IF NOT EXISTS channel_mappings (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id TEXT NOT NULL DEFAULT '',
     source_channel_id TEXT NOT NULL,
     target_channel_id TEXT NOT NULL,
     is_forum INTEGER DEFAULT 0,
@@ -102,7 +129,7 @@ db.exec(`
   );
 `);
 
-// ─── Module 5: OAuth2 Tokens ───
+// ─── Module 5: OAuth2 Tokens (global — one per user, works across all guilds) ───
 db.exec(`
   CREATE TABLE IF NOT EXISTS oauth_tokens (
     user_id TEXT PRIMARY KEY,

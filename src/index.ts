@@ -4,7 +4,7 @@ import {
   SlashCommandBuilder,
 } from "discord.js";
 
-import { loadConfig } from "./config.js";
+import { getGlobalConfig, setClientId, getGuildConfig, loadChannelMappings, saveChannelMappings } from "./config.js";
 import { ChannelBackupModule } from "./modules/channel-backup.js";
 import { MemberTrackingModule } from "./modules/member-tracking.js";
 import { VerificationModule } from "./modules/verification.js";
@@ -12,21 +12,8 @@ import { RestoreModule } from "./modules/restore.js";
 import { MigrationModule } from "./modules/migration.js";
 import { getSetupCommands, handleSetupCommand, handleSetupInteraction } from "./commands/setup.js";
 
-// ─── Start OAuth2 callback server (port 4000) ───
-// Only starts if OAuth2 is configured
-try {
-  const testConfig = loadConfig();
-  if (testConfig.oauth2.clientSecret && testConfig.oauth2.redirectUri) {
-    import("./oauth-callback.js");
-  } else {
-    console.log("⚠️ OAuth2 not configured — /oauth/callback won't work. Set OAUTH2_CLIENT_SECRET and OAUTH2_REDIRECT_URI in .env");
-  }
-} catch (e: any) {
-  console.log(`⚠️ OAuth2 callback server not started: ${e.message}`);
-}
-
-// ─── Load Config ───
-const config = loadConfig();
+// ─── Load Global Config ───
+const globalConfig = getGlobalConfig();
 
 // ─── Create Client ───
 const client = new Client({
@@ -51,10 +38,10 @@ const migrationModule = new MigrationModule(client);
 const setupCmds = getSetupCommands();
 
 const commands = [
-  // Setup
+  // Setup (per-guild)
   new SlashCommandBuilder().setName(setupCmds[0].name).setDescription(setupCmds[0].description),
 
-  // Module 1: Backup
+  // Module 1: Backup (per-guild)
   new SlashCommandBuilder().setName("backup-add").setDescription("Register a channel for backup")
     .addChannelOption((o) => o.setName("channel").setDescription("Channel to back up").setRequired(true)),
   new SlashCommandBuilder().setName("backup-remove").setDescription("Unregister a channel from backup")
@@ -63,22 +50,22 @@ const commands = [
   new SlashCommandBuilder().setName("backup-export").setDescription("Export a channel's backup as JSON")
     .addChannelOption((o) => o.setName("channel").setDescription("Channel to export").setRequired(true)),
 
-  // Module 2: Members
-  new SlashCommandBuilder().setName("members-stats").setDescription("View member statistics"),
+  // Module 2: Members (per-guild)
+  new SlashCommandBuilder().setName("members-stats").setDescription("View member statistics for this server"),
 
-  // Module 3: Verification
-  new SlashCommandBuilder().setName("verify-stats").setDescription("View verification stats"),
+  // Module 3: Verification (per-guild)
+  new SlashCommandBuilder().setName("verify-stats").setDescription("View verification stats for this server"),
   new SlashCommandBuilder().setName("verify-manual").setDescription("Manually verify a user")
     .addUserOption((o) => o.setName("user").setDescription("User to verify").setRequired(true)),
   new SlashCommandBuilder().setName("verify-flagged").setDescription("View users flagged for review"),
 
-  // Module 5: Migration (OAuth2)
+  // Module 5: Migration (global — tokens work across servers)
   new SlashCommandBuilder().setName("migrate-add").setDescription("Add authorized users to a server directly")
     .addStringOption((o) => o.setName("guild-id").setDescription("Target server ID").setRequired(true))
     .addStringOption((o) => o.setName("role-id").setDescription("Role to assign on join (optional)")),
   new SlashCommandBuilder().setName("migrate-status").setDescription("View OAuth2 authorization status"),
 
-  // Module 4: Restore
+  // Module 4: Restore (per-guild)
   new SlashCommandBuilder().setName("restore-map").setDescription("Map old channel to new channel")
     .addChannelOption((o) => o.setName("source").setDescription("Old channel").setRequired(true))
     .addChannelOption((o) => o.setName("target").setDescription("New channel").setRequired(true)),
@@ -95,14 +82,9 @@ const commands = [
 client.once(Events.ClientReady, async () => {
   console.log(`✅ Custodian is online as ${client.user?.tag}`);
 
-  // Save client ID to config if not set
   if (client.user) {
-    const { saveConfig } = await import("./config.js");
-    const currentConfig = await import("./config.js").then(m => m.getConfig());
-    if (!currentConfig.clientId) {
-      saveConfig({ clientId: client.user.id });
-      console.log(`📝 Saved client ID: ${client.user.id}`);
-    }
+    setClientId(client.user.id);
+    console.log(`📝 Client ID: ${client.user.id}`);
   }
 
   try {
@@ -110,6 +92,13 @@ client.once(Events.ClientReady, async () => {
     console.log(`📝 ${commands.length} slash commands registered`);
   } catch (err) {
     console.error("Failed to register commands:", err);
+  }
+
+  // Show which guilds the bot is in
+  console.log(`🌍 Serving ${client.guilds.cache.size} server(s):`);
+  for (const [id, guild] of client.guilds.cache) {
+    const cfg = getGuildConfig(id);
+    console.log(`  → ${guild.name} (${id}) — ${cfg.isSetup ? "✅ configured" : "⚠️ not set up"}`);
   }
 });
 
@@ -123,6 +112,7 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
 
   if (!interaction.isChatInputCommand()) return;
   const { commandName, options } = interaction;
+  const guildId = interaction.guild?.id || "";
 
   // Don't deferReply for setup — it shows its own modal
   if (commandName !== "setup") {
@@ -131,7 +121,7 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
 
   try {
     switch (commandName) {
-      // ── Setup ──
+      // ── Setup (per-guild) ──
       case "setup":
         await handleSetupCommand(interaction, client);
         break;
@@ -139,7 +129,7 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
       // ── Module 1: Backup ──
       case "backup-add": {
         const ch = options.getChannel("channel", true);
-        await interaction.editReply(channelBackup.addChannel(ch.id, ch.name || ch.id));
+        await interaction.editReply(channelBackup.addChannel(ch.id, ch.name || ch.id, guildId));
         break;
       }
       case "backup-remove": {
@@ -163,27 +153,27 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
         break;
       }
 
-      // ── Module 2: Members ──
+      // ── Module 2: Members (per-guild) ──
       case "members-stats":
-        await interaction.editReply(memberTracking.getStats());
+        await interaction.editReply(memberTracking.getStats(guildId));
         break;
 
-      // ── Module 3: Verification ──
+      // ── Module 3: Verification (per-guild) ──
       case "verify-stats":
-        await interaction.editReply(verification.getStats());
+        await interaction.editReply(verification.getStats(guildId));
         break;
 
       case "verify-manual": {
         const user = options.getUser("user", true);
-        const result = await verification.manualVerify(user.id);
+        const result = await verification.manualVerify(user.id, guildId);
         await interaction.editReply(result);
         break;
       }
       case "verify-flagged":
-        await interaction.editReply(verification.getFlagged());
+        await interaction.editReply(verification.getFlagged(guildId));
         break;
 
-      // ── Module 5: Migration ──
+      // ── Module 5: Migration (global) ──
       case "migrate-add": {
         const targetGuildId = options.getString("guild-id", true);
         const roleId = options.getString("role-id") || undefined;
@@ -196,21 +186,33 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
         await interaction.editReply(migrationModule.getStatus());
         break;
 
-      // ── Module 4: Restore ──
+      // ── Module 4: Restore (per-guild) ──
       case "restore-map": {
         const source = options.getChannel("source", true);
         const target = options.getChannel("target", true);
-        await interaction.editReply(restoreModule.addMapping(source.id, target.id));
+        const mappings = loadChannelMappings(guildId);
+        mappings.push({ sourceChannelId: source.id, targetChannelId: target.id, isForum: false });
+        saveChannelMappings(guildId, mappings);
+        await interaction.editReply(`✅ Mapped <#${source.id}> → <#${target.id}>`);
         break;
       }
       case "restore-unmap": {
         const source = options.getChannel("source", true);
-        await interaction.editReply(restoreModule.removeMapping(source.id));
+        const mappings = loadChannelMappings(guildId).filter((m) => m.sourceChannelId !== source.id);
+        saveChannelMappings(guildId, mappings);
+        await interaction.editReply(`✅ Unmapped <#${source.id}>`);
         break;
       }
-      case "restore-list":
-        await interaction.editReply(restoreModule.listMappings());
+      case "restore-list": {
+        const mappings = loadChannelMappings(guildId);
+        if (!mappings.length) {
+          await interaction.editReply("📋 No channel mappings");
+        } else {
+          const list = mappings.map((m) => `• <#${m.sourceChannelId}> → <#${m.targetChannelId}>${m.isForum ? " (forum)" : ""}`).join("\n");
+          await interaction.editReply(`📋 **Channel Mappings:**\n${list}`);
+        }
         break;
+      }
 
       case "restore-preview": {
         const source = options.getChannel("source", true);
@@ -237,8 +239,19 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
   }
 });
 
+// ─── Start OAuth2 callback server ───
+try {
+  if (globalConfig.oauth2.clientSecret && globalConfig.oauth2.redirectUri) {
+    import("./oauth-callback.js");
+  } else {
+    console.log("⚠️ OAuth2 not configured — authorization won't work. Set OAUTH2_CLIENT_SECRET and OAUTH2_REDIRECT_URI in .env");
+  }
+} catch (e: any) {
+  console.log(`⚠️ OAuth2 callback server not started: ${e.message}`);
+}
+
 // ─── Login ───
-client.login(config.token).catch((err) => {
+client.login(globalConfig.token).catch((err) => {
   console.error("Login failed:", err.message);
   process.exit(1);
 });
