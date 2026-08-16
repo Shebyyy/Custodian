@@ -1,7 +1,7 @@
 // @ts-nocheck — discord.js type quirks with bun
 import {
   ActionRowBuilder, ButtonBuilder, ButtonStyle, Client, Colors, EmbedBuilder, Events,
-  GuildMember, Interaction,
+  GuildMember, Interaction, MessageFlags,
   ModalBuilder, TextInputBuilder, TextInputStyle, TextChannel,
 } from "discord.js";
 import { getDb } from "../db.js";
@@ -153,12 +153,12 @@ export class VerificationModule {
         .get(userId, guildId) as any;
 
       if (record?.status === "verified") {
-        await interaction.reply({ content: "You're already verified!", ephemeral: true });
+        await interaction.reply({ content: "You're already verified!", flags: MessageFlags.Ephemeral });
         return;
       }
 
       if (record?.attempts >= config.quiz.maxAttempts) {
-        await interaction.reply({ content: "You've used all attempts. An admin will review your case.", ephemeral: true });
+        await interaction.reply({ content: "You've used all attempts. An admin will review your case.", flags: MessageFlags.Ephemeral });
         return;
       }
 
@@ -167,19 +167,19 @@ export class VerificationModule {
           const authUrl = getOAuth2Url();
           await interaction.reply({
             content: `You need to authorize the bot first!\n\nClick here: **[Authorize Bot](${authUrl})**\n\nThen click **Verify Me** again.`,
-            ephemeral: true,
+            flags: MessageFlags.Ephemeral,
           });
         } catch {
           await interaction.reply({
             content: "You need to authorize the bot first! Ask an admin for help.",
-            ephemeral: true,
+            flags: MessageFlags.Ephemeral,
           });
         }
         return;
       }
 
       if (!config.quiz.questions.length && !config.quiz.finalQuestion) {
-        await interaction.reply({ content: "No quiz configured. Admin needs to add questions with /quiz-add.", ephemeral: true });
+        await interaction.reply({ content: "No quiz configured. Admin needs to add questions with /quiz-add.", flags: MessageFlags.Ephemeral });
         return;
       }
 
@@ -208,7 +208,7 @@ export class VerificationModule {
 
       console.log(`[Quiz] User ${userId} answers:`, JSON.stringify(answers));
 
-      await interaction.reply({ content: "All answers submitted! Grading...", ephemeral: true });
+      await interaction.reply({ content: "All answers submitted! Grading...", flags: MessageFlags.Ephemeral });
       setTimeout(() => this.grade(userId, guildId, interaction, answers), 500);
     });
   }
@@ -357,7 +357,7 @@ export class VerificationModule {
             .setTimestamp()
         );
 
-        await interaction.followUp({ content: `**Passed!** ${correct}/${total} — All correct! You now have full access.`, ephemeral: true });
+        await interaction.followUp({ content: `**Passed!** ${correct}/${total} — All correct! You now have full access.`, flags: MessageFlags.Ephemeral });
       } else {
         db.prepare("UPDATE verifications SET status = 'failed', attempts = ?, score = ?, answers_json = ? WHERE user_id = ? AND guild_id = ?")
           .run(newAttempts, correct, JSON.stringify(answers), userId, guildId);
@@ -381,7 +381,7 @@ export class VerificationModule {
           );
           await interaction.followUp({
             content: `**Failed** — ${correct}/${total}. All answers must be correct.\n${remaining} attempt${remaining > 1 ? "s" : ""} remaining.`,
-            ephemeral: true,
+            flags: MessageFlags.Ephemeral,
           });
         } else {
           db.prepare("UPDATE verifications SET status = 'flagged_review' WHERE user_id = ? AND guild_id = ?").run(userId, guildId);
@@ -399,7 +399,7 @@ export class VerificationModule {
               .addFields({ name: "Wrong Answers", value: wrongField })
               .setTimestamp()
           );
-          await interaction.followUp({ content: "Max attempts reached. An admin will review your case.", ephemeral: true });
+          await interaction.followUp({ content: "Max attempts reached. An admin will review your case.", flags: MessageFlags.Ephemeral });
         }
       }
     } catch (err) {

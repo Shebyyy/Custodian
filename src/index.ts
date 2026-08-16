@@ -1,6 +1,6 @@
 // @ts-nocheck — discord.js type quirks with bun
 import {
-  Client, Events, GatewayIntentBits, Interaction, Partials,
+  Client, Events, GatewayIntentBits, Interaction, MessageFlags, Partials,
   SlashCommandBuilder,
 } from "discord.js";
 
@@ -154,7 +154,7 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
 
   // Don't deferReply for commands that show their own modal
   if (commandName !== "setup" && commandName !== "post-verify" && commandName !== "quiz-add" && commandName !== "set-final-question") {
-    await interaction.deferReply({ ephemeral: true }).catch(() => {});
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
   }
 
   try {

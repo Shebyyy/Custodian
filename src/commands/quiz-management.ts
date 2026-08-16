@@ -1,6 +1,6 @@
 // @ts-nocheck — discord.js type quirks with bun
 import {
-  Client, CommandInteraction, Interaction, ModalBuilder,
+  Client, CommandInteraction, Interaction, MessageFlags, ModalBuilder,
   ActionRowBuilder, ButtonBuilder, ButtonStyle, TextInputBuilder, TextInputStyle,
   SlashCommandBuilder, PermissionFlagsBits,
 } from "discord.js";
@@ -20,7 +20,7 @@ export async function handlePostVerifyCommand(interaction: CommandInteraction, c
   const config = getGuildConfig(guildId);
 
   if (!config.channels.verification) {
-    await interaction.reply({ content: "❌ No verification channel set. Run /setup first.", ephemeral: true });
+    await interaction.reply({ content: "❌ No verification channel set. Run /setup first.", flags: MessageFlags.Ephemeral });
     return;
   }
 
@@ -38,7 +38,7 @@ export async function handlePostVerifyCommand(interaction: CommandInteraction, c
   try {
     const channel = await client.channels.fetch(config.channels.verification);
     if (!channel || !channel.isTextBased()) {
-      await interaction.reply({ content: "❌ Verification channel not found.", ephemeral: true });
+      await interaction.reply({ content: "❌ Verification channel not found.", flags: MessageFlags.Ephemeral });
       return;
     }
 
@@ -47,9 +47,9 @@ export async function handlePostVerifyCommand(interaction: CommandInteraction, c
       components: [row],
     });
 
-    await interaction.reply({ content: `✅ Verification button posted in <#${config.channels.verification}>`, ephemeral: true });
+    await interaction.reply({ content: `✅ Verification button posted in <#${config.channels.verification}>`, flags: MessageFlags.Ephemeral });
   } catch (err: any) {
-    await interaction.reply({ content: `❌ Failed: ${err.message}`, ephemeral: true });
+    await interaction.reply({ content: `❌ Failed: ${err.message}`, flags: MessageFlags.Ephemeral });
   }
 }
 
@@ -233,7 +233,7 @@ export async function handleManagementModal(interaction: Interaction, client: Cl
     const answer = interaction.fields.getTextInputValue("answer").trim();
 
     if (!question || !answer) {
-      await interaction.reply({ content: "❌ Both fields are required.", ephemeral: true });
+      await interaction.reply({ content: "❌ Both fields are required.", flags: MessageFlags.Ephemeral });
       return true;
     }
 
@@ -246,7 +246,7 @@ export async function handleManagementModal(interaction: Interaction, client: Cl
 
     await interaction.reply({
       content: `✅ **Fixed question updated!**\n\n**Q:** ${question}\n**Answer:** \`${answer}\``,
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
     return true;
   }
@@ -260,7 +260,7 @@ export async function handleManagementModal(interaction: Interaction, client: Cl
     const correctAnswer = interaction.fields.getTextInputValue("correct_answer").trim();
 
     if (!question || !optionA || !optionB || !correctAnswer) {
-      await interaction.reply({ content: "❌ All fields are required.", ephemeral: true });
+      await interaction.reply({ content: "❌ All fields are required.", flags: MessageFlags.Ephemeral });
       return true;
     }
 
@@ -281,7 +281,7 @@ export async function handleManagementModal(interaction: Interaction, client: Cl
     const options = newQuestion.options.map((o, i) => `${String.fromCharCode(65 + i)}. ${o}${o === correctAnswer ? " ✅" : ""}`).join(" | ");
     await interaction.reply({
       content: `✅ **Question added!** (Pool: ${config.quiz.questions.length})\n\n**Q${newQuestion.id}:** ${newQuestion.question}\n   ${options}`,
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
     return true;
   }

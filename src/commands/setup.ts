@@ -1,6 +1,6 @@
 // @ts-nocheck — discord.js type quirks with bun
 import {
-  Client, CommandInteraction, Interaction,
+  Client, CommandInteraction, Interaction, MessageFlags,
   SlashCommandBuilder, PermissionFlagsBits,
 } from "discord.js";
 import { getGuildConfig, saveGuildConfig, getGlobalConfig } from "../config.js";
@@ -32,7 +32,7 @@ export function getSetupCommands() {
 export async function handleSetupCommand(interaction: CommandInteraction, client: Client): Promise<void> {
   const guild = interaction.guild;
   if (!guild) {
-    await interaction.reply({ content: "❌ Run this command in a server.", ephemeral: true });
+    await interaction.reply({ content: "❌ Run this command in a server.", flags: MessageFlags.Ephemeral });
     return;
   }
 
@@ -79,7 +79,7 @@ export async function handleSetupCommand(interaction: CommandInteraction, client
       (getGlobalConfig().oauth2.clientSecret
         ? "🔐 OAuth2: ✅ configured"
         : "🔐 OAuth2: ⚠️ not set — migration won't work"),
-    ephemeral: true,
+    flags: MessageFlags.Ephemeral,
   });
 }
 
