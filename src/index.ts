@@ -94,7 +94,10 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
   if (!interaction.isChatInputCommand()) return;
   const { commandName, options } = interaction;
 
-  await interaction.deferReply({ ephemeral: true }).catch(() => {});
+  // Don't deferReply for setup — it handles its own reply
+  if (commandName !== "setup") {
+    await interaction.deferReply({ ephemeral: true }).catch(() => {});
+  }
 
   try {
     switch (commandName) {
