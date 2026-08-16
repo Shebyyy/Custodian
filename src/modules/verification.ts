@@ -64,15 +64,6 @@ export class VerificationModule {
 
       // Log to logs channel
       await this.sendLog(guildId, `👤 **${member.user.username}** (<@${member.user.id}>) joined — assigned Unverified role`);
-
-      // DM the user — only they see it
-      try {
-        await member.send(
-          `👋 Welcome to **${member.guild.name}**!\n\nPlease read the rules in <#${config.channels.verification}> and click **✅ Verify Me** to get full access.`
-        );
-      } catch {
-        // DMs closed — silent fail
-      }
     });
 
     // ── Handle "Verify Me" button (shared — anyone can click) ──
