@@ -226,9 +226,9 @@ export class VerificationModule {
     if (!items.length) return;
 
     const actionRows = items.map((item) => {
-      const label = item.isFixed ? truncate(item.question, 40) : `Q: ${truncate(item.question, 40)}`;
+      const label = item.isFixed ? "📌 Fixed Question — type exactly" : `Q: ${truncate(item.question, 35)}`;
       const placeholder = item.isFixed
-        ? "Type the exact text..."
+        ? `Type: ${item.correctAnswer}`
         : item.options.map((o, i) => `${String.fromCharCode(65 + i)}. ${o}`).join(" | ");
 
       return new ActionRowBuilder<TextInputBuilder>().addComponents(
