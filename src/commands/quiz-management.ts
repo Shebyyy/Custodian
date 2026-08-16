@@ -45,7 +45,7 @@ export async function handlePostVerifyCommand(interaction: CommandInteraction, c
     }
 
     await (channel as any).send({
-      content: "Click **✅ Verify Me** below to start verification and get full access.",
+      content: `New here? Read the rules above, then follow these steps:\n\n1️⃣ Click **🔗 Authorize Bot** to link your account\n2️⃣ Click **✅ Verify Me** to take a quick quiz\n3️⃣ Pass and you're in!`,
       components: [row],
     });
 
