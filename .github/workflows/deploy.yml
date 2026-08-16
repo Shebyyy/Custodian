@@ -1,0 +1,79 @@
+name: Deploy Custodian to Server
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          password: ${{ secrets.SERVER_PASSWORD }}
+          command_timeout: 120s
+          script_stop: false
+          script: |
+            set -e
+            echo "=== Deploying Custodian (main) ==="
+
+            # Check prerequisites
+            echo "[1/6] Checking prerequisites..."
+            which git || { echo "ERROR: git not installed"; exit 1; }
+            which bun || { echo "ERROR: bun not installed"; exit 1; }
+            echo "OK: git, bun available"
+
+            # Clone or pull
+            echo "[2/6] Fetching code..."
+            if [ -d /root/Custodian/.git ]; then
+              cd /root/Custodian
+              git fetch origin main
+              git clean -fd
+              git reset --hard origin/main
+            else
+              rm -rf /root/Custodian
+              git clone -b main https://github.com/${{ github.repository }}.git /root/Custodian
+            fi
+            echo "OK: code fetched"
+
+            # Install deps
+            echo "[3/6] Installing dependencies..."
+            cd /root/Custodian
+            /root/.bun/bin/bun install
+            echo "OK: deps installed"
+
+            # Write .env from secrets
+            echo "[4/6] Writing .env..."
+            printf 'DISCORD_BOT_TOKEN=%s\n' \
+              '${{ secrets.DISCORD_BOT_TOKEN }}' \
+              > /root/Custodian/.env
+            chmod 600 /root/Custodian/.env
+            echo "OK: .env written"
+
+            # Kill old process
+            echo "[5/6] Restarting bot..."
+            if [ -f /root/Custodian/data/bot.pid ]; then
+              kill $(cat /root/Custodian/data/bot.pid) 2>/dev/null || true
+              rm -f /root/Custodian/data/bot.pid
+            fi
+            sleep 2
+
+            # Start
+            mkdir -p /root/Custodian/data
+            setsid /root/.bun/bin/bun run /root/Custodian/src/index.ts > /root/Custodian/data/bot.log 2>&1 &
+            echo $! > /root/Custodian/data/bot.pid
+            sleep 5
+
+            # Health check
+            echo "[6/6] Health check..."
+            if kill -0 $(cat /root/Custodian/data/bot.pid) 2>/dev/null; then
+              echo "✅ Custodian is running (PID: $(cat /root/Custodian/data/bot.pid))"
+            else
+              echo "❌ Custodian failed to start!"
+              cat /root/Custodian/data/bot.log
+              exit 1
+            fi
