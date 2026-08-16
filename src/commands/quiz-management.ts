@@ -5,13 +5,12 @@ import {
   SlashCommandBuilder, PermissionFlagsBits,
 } from "discord.js";
 import { getGuildConfig, saveGuildConfig, QuizQuestion } from "../config.js";
-import { VerificationModule } from "../modules/verification.js";
 
 // ─── /post-verify ───
 export function getPostVerifyCommand() {
   return new SlashCommandBuilder()
     .setName("post-verify")
-    .setDescription("Post verification panel with rules + verify button in verification channel")
+    .setDescription("Post verification button in verification channel")
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator);
 }
 
@@ -19,24 +18,36 @@ export async function handlePostVerifyCommand(interaction: CommandInteraction, c
   const guildId = interaction.guild?.id || "";
   const config = getGuildConfig(guildId);
 
-  const modal = new ModalBuilder()
-    .setCustomId(`post_verify:${guildId}`)
-    .setTitle("📜 Post Verification Panel");
+  if (!config.channels.verification) {
+    await interaction.reply({ content: "❌ No verification channel set. Run /setup first.", ephemeral: true });
+    return;
+  }
 
-  const rulesInput = new ActionRowBuilder<TextInputBuilder>().addComponents(
-    new TextInputBuilder()
-      .setCustomId("rules_text")
-      .setLabel("Server Rules")
-      .setStyle(TextInputStyle.Paragraph)
-      .setValue(config.termsAndConditions)
-      .setPlaceholder("Enter your server rules here...")
-      .setRequired(true)
-      .setMaxLength(1500)
+  const { ActionRowBuilder: Arb, ButtonBuilder, ButtonStyle } = await import("discord.js");
+
+  const row = new Arb<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`verify_start:${guildId}`)
+      .setLabel("✅ Verify Me")
+      .setStyle(ButtonStyle.Success)
   );
 
-  modal.addComponents(rulesInput);
+  try {
+    const channel = await client.channels.fetch(config.channels.verification);
+    if (!channel || !channel.isTextBased()) {
+      await interaction.reply({ content: "❌ Verification channel not found.", ephemeral: true });
+      return;
+    }
 
-  await interaction.showModal(modal);
+    await (channel as any).send({
+      content: "Click **✅ Verify Me** below to start verification and get full access.",
+      components: [row],
+    });
+
+    await interaction.reply({ content: `✅ Verification button posted in <#${config.channels.verification}>`, ephemeral: true });
+  } catch (err: any) {
+    await interaction.reply({ content: `❌ Failed: ${err.message}`, ephemeral: true });
+  }
 }
 
 // ─── /quiz-add ───
@@ -165,30 +176,6 @@ export async function handleManagementModal(interaction: Interaction, client: Cl
   if (!interaction.isModalSubmit()) return false;
 
   const customId = interaction.customId;
-
-  // ── Post Verify modal ──
-  if (customId.startsWith("post_verify:")) {
-    const guildId = customId.split(":")[1];
-    const rulesText = interaction.fields.getTextInputValue("rules_text").trim();
-
-    if (!rulesText) {
-      await interaction.reply({ content: "❌ Rules cannot be empty.", ephemeral: true });
-      return true;
-    }
-
-    const config = getGuildConfig(guildId);
-    saveGuildConfig(guildId, { termsAndConditions: rulesText });
-
-    // Post the verification panel
-    const verificationModule = new VerificationModule(client);
-    const result = await verificationModule.postVerificationPanel(guildId);
-
-    await interaction.reply({
-      content: `✅ **Rules saved!** ${result}`,
-      ephemeral: true,
-    });
-    return true;
-  }
 
   // ── Quiz Add modal ──
   if (customId.startsWith("quiz_add:")) {

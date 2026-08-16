@@ -95,7 +95,7 @@ export function setClientId(clientId: string): void {
 
 const defaultQuiz: QuizQuestion[] = [];
 
-const defaultTerms = "## Server Rules\n\n1. Be respectful to all members.\n2. No spam, self-promotion, or unsolicited DMs.\n3. No NSFW or offensive content.\n4. Follow Discord's Terms of Service.\n5. Listen to staff — their decisions are final.\n6. Use channels for their intended purpose.\n\n**Breaking these rules may result in warnings, kicks, or bans.**";
+const defaultTerms = "";
 
 /** Get config for a specific guild. Returns defaults if not set up yet. */
 export function getGuildConfig(guildId: string): GuildConfig {

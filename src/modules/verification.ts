@@ -9,17 +9,17 @@ import { getGuildConfig, getGlobalConfig, GuildConfig, QuizQuestion } from "../c
 import { getOAuth2Url, hasValidToken, truncate } from "../utils.js";
 
 /**
- * Module 3 — Verification + Authorization + Quiz Gate (Channel-Based, Multi-Server)
+ * Module 3 — Verification + Quiz Gate (Shared Panel, Multi-Server)
  *
- * Admin uses /post-verify to post ONE shared verification message with rules + verify button.
- * When a member joins:
- * 1. Bot assigns Unverified role
- * 2. Brief welcome message pointing to the verification channel
- * 3. User clicks "Verify Me" on the shared message
- * 4. If no token → gets their authorize link
- * 5. Takes quiz → pass → Verified role, fail → retry
+ * Flow:
+ * 1. Admin posts rules manually in verification channel
+ * 2. Admin runs /post-verify → bot posts ONE message with "Verify Me" button
+ * 3. When member joins → bot assigns Unverified role + brief welcome
+ * 4. User clicks shared "Verify Me" button
+ * 5. If no token → gets authorize link
+ * 6. Takes quiz → pass → Verified role, fail → retry
  *
- * All detailed logs go to logs channel.
+ * All logs go to logs channel.
  */
 export class VerificationModule {
   private client: Client;
@@ -40,37 +40,6 @@ export class VerificationModule {
       }
     } catch (err) {
       console.error(`[${guildId}] Failed to send log:`, err);
-    }
-  }
-
-  /** Post the shared verification panel (called by /post-verify command) */
-  async postVerificationPanel(guildId: string): Promise<string> {
-    const config = getGuildConfig(guildId);
-    if (!config.channels.verification) return "❌ No verification channel set. Run /setup first.";
-
-    const rules = config.termsAndConditions || "No rules set.";
-
-    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-      new ButtonBuilder()
-        .setCustomId(`verify_start:${guildId}`)
-        .setLabel("✅ Verify Me")
-        .setStyle(ButtonStyle.Success)
-    );
-
-    try {
-      const channel = await this.client.channels.fetch(config.channels.verification);
-      if (!channel || !channel.isTextBased()) return "❌ Verification channel not found.";
-
-      await (channel as TextChannel).send({
-        content:
-          `📜 **Server Rules:**\n${rules}\n\n───\n\n` +
-          `To get full access, click **✅ Verify Me** below.`,
-        components: [row],
-      });
-
-      return `✅ Verification panel posted in <#${config.channels.verification}>`;
-    } catch (err: any) {
-      return `❌ Failed to post: ${err.message}`;
     }
   }
 
@@ -96,12 +65,12 @@ export class VerificationModule {
       // Log to logs channel
       await this.sendLog(guildId, `👤 **${member.user.username}** (<@${member.user.id}>) joined — assigned Unverified role`);
 
-      // Brief welcome — tell them to go verify
+      // Brief welcome — point to verification channel
       try {
         const channel = await this.client.channels.fetch(config.channels.verification);
         if (channel && channel.isTextBased()) {
           await (channel as TextChannel).send(
-            `👋 Welcome <@${member.user.id}>! Please read the rules above and click **✅ Verify Me** to get full access.`
+            `👋 Welcome <@${member.user.id}>! Please read the rules above and click **✅ Verify Me** below to get full access.`
           );
         }
       } catch (err) {
@@ -109,7 +78,7 @@ export class VerificationModule {
       }
     });
 
-    // ── Handle "Verify Me" button (shared — works for any user who clicks) ──
+    // ── Handle "Verify Me" button (shared — anyone can click) ──
     this.client.on(Events.InteractionCreate, async (interaction: Interaction) => {
       if (!interaction.isButton()) return;
       if (!interaction.customId.startsWith("verify_start:")) return;
@@ -158,7 +127,6 @@ export class VerificationModule {
       db.prepare("UPDATE verifications SET agreed_to_rules_at = datetime('now'), quiz_started_at = datetime('now'), status = 'in_progress' WHERE user_id = ? AND guild_id = ?")
         .run(userId, guildId);
 
-      // Show all questions in one modal
       await this.sendQuizModal(interaction, guildId);
     });
 
@@ -168,7 +136,6 @@ export class VerificationModule {
       if (!interaction.customId.startsWith("quiz_all_")) return;
 
       const parts = interaction.customId.split("_");
-      // quiz_all_{userId}_{guildId}
       const userId = parts[2];
       const guildId = parts[3];
 
@@ -186,7 +153,7 @@ export class VerificationModule {
 
   private async sendQuizModal(interaction: any, guildId: string) {
     const config = getGuildConfig(guildId);
-    const questions = config.quiz.questions.slice(0, 5); // Discord max 5 fields
+    const questions = config.quiz.questions.slice(0, 5);
 
     if (!questions.length) return;
 
