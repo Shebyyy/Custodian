@@ -58,8 +58,9 @@ jobs:
             chmod 600 /root/Custodian/.env
             echo "OK: .env written"
 
-            # Setup database
+            # Create data dir + setup database
             echo "[5/6] Setting up database..."
+            mkdir -p /root/Custodian/data
             cd /root/Custodian
             bun run db:setup
             echo "OK: database ready"
@@ -73,7 +74,6 @@ jobs:
             sleep 2
 
             # Start
-            mkdir -p /root/Custodian/data
             setsid bun run /root/Custodian/src/index.ts > /root/Custodian/data/bot.log 2>&1 &
             echo $! > /root/Custodian/data/bot.pid
             sleep 5

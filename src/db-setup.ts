@@ -1,7 +1,11 @@
 import { Database } from "bun:sqlite";
-import { resolve } from "path";
+import { mkdirSync } from "node:fs";
+import { resolve } from "node:path";
 
 const DB_PATH = resolve(import.meta.dir, "../data/bot.db");
+
+// Ensure data directory exists
+mkdirSync(resolve(import.meta.dir, "../data"), { recursive: true });
 
 const db = new Database(DB_PATH, { create: true });
 db.exec("PRAGMA journal_mode = WAL");
