@@ -180,7 +180,7 @@ function buildRoleSelect(state: SetupState) {
 
 function getRoleOptions(guild: any, roleType: string) {
   const roles = guild.roles.cache.filter((r: any) => !r.managed && r.name !== "@everyone").sort((a: any, b: any) => b.position - a.position);
-  return roles
+  return [...roles.values()]
     .slice(0, MAX_SELECT_OPTIONS)
     .map((r: any) =>
       new StringSelectMenuOptionBuilder()
@@ -277,7 +277,7 @@ function getChannelOptions(guild: any, chType: string) {
   const channels = guild.channels.cache
     .filter((c: any) => c.type === ChannelType.GuildText)
     .sorted((a: any, b: any) => a.position - b.position);
-  return channels
+  return [...channels.values()]
     .slice(0, MAX_SELECT_OPTIONS)
     .map((c: any) =>
       new StringSelectMenuOptionBuilder()
