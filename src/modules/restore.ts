@@ -1,4 +1,5 @@
 // @ts-nocheck — bun runs fine with these discord.js types
+import { Client, ChannelType, TextChannel, ForumChannel } from "discord.js";
 import { getDb } from "../db.js";
 import { getConfig, loadChannelMappings, saveChannelMappings, ChannelMapping } from "../config.js";
 import { sleep } from "../utils.js";
@@ -63,7 +64,8 @@ export class RestoreModule {
     if (!targetChannel || !targetChannel.isTextBased()) return `❌ Cannot access <#${mapping.targetChannelId}>`;
 
     const db = getDb();
-    const runId = (db.prepare("INSERT INTO restore_runs (source_channel_id, target_channel_id, total_messages, status, started_at) VALUES (?, ?, ?, 'running', datetime('now'))").run(source, mapping.targetChannelId, messages.length)).lastInsertRowid;
+    const res = db.prepare("INSERT INTO restore_runs (source_channel_id, target_channel_id, total_messages, status, started_at) VALUES (?, ?, ?, 'running', datetime('now'))").run(source, mapping.targetChannelId, messages.length);
+    const runId = Number(res.lastInsertRowid);
 
     let restored = 0;
     try {

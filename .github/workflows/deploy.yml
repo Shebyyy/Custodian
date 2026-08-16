@@ -15,25 +15,14 @@ jobs:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           password: ${{ secrets.SERVER_PASSWORD }}
-          command_timeout: 300s
+          command_timeout: 180s
           script_stop: false
           script: |
             set -e
             echo "=== Deploying Custodian (main) ==="
 
-            # Install build tools (needed for better-sqlite3 native compile)
-            echo "[1/8] Checking build tools..."
-            if ! which make || ! which gcc; then
-              echo "Installing build-essential, python3..."
-              apt-get update -qq
-              apt-get install -y -qq build-essential python3
-              echo "OK: build tools installed"
-            else
-              echo "OK: build tools already available"
-            fi
-
             # Install bun if missing
-            echo "[2/8] Checking bun..."
+            echo "[1/6] Checking bun..."
             if ! which bun; then
               echo "Installing bun..."
               curl -fsSL https://bun.sh/install | bash
@@ -42,7 +31,7 @@ jobs:
             echo "OK: bun available ($(bun --version))"
 
             # Clone or pull
-            echo "[3/8] Fetching code..."
+            echo "[2/6] Fetching code..."
             if [ -d /root/Custodian/.git ]; then
               cd /root/Custodian
               git fetch origin main
@@ -54,15 +43,15 @@ jobs:
             fi
             echo "OK: code fetched"
 
-            # Install deps (clean node_modules to force native recompile)
-            echo "[4/8] Installing dependencies..."
+            # Install deps
+            echo "[3/6] Installing dependencies..."
             cd /root/Custodian
             rm -rf node_modules
             bun install
             echo "OK: deps installed"
 
             # Write .env from secrets
-            echo "[5/8] Writing .env..."
+            echo "[4/6] Writing .env..."
             printf 'DISCORD_BOT_TOKEN=%s\n' \
               '${{ secrets.DISCORD_BOT_TOKEN }}' \
               > /root/Custodian/.env
@@ -70,13 +59,13 @@ jobs:
             echo "OK: .env written"
 
             # Setup database
-            echo "[6/8] Setting up database..."
+            echo "[5/6] Setting up database..."
             cd /root/Custodian
             bun run db:setup
             echo "OK: database ready"
 
             # Kill old process
-            echo "[7/8] Restarting bot..."
+            echo "[6/6] Restarting bot..."
             if [ -f /root/Custodian/data/bot.pid ]; then
               kill $(cat /root/Custodian/data/bot.pid) 2>/dev/null || true
               rm -f /root/Custodian/data/bot.pid
@@ -90,7 +79,7 @@ jobs:
             sleep 5
 
             # Health check
-            echo "[8/8] Health check..."
+            echo "Health check..."
             if kill -0 $(cat /root/Custodian/data/bot.pid) 2>/dev/null; then
               echo "✅ Custodian is running (PID: $(cat /root/Custodian/data/bot.pid))"
             else

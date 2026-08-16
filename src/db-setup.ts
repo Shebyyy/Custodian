@@ -1,10 +1,10 @@
-import Database from "better-sqlite3";
+import { Database } from "bun:sqlite";
 import { resolve } from "path";
 
 const DB_PATH = resolve(import.meta.dir, "../data/bot.db");
 
-const db = new Database(DB_PATH);
-db.pragma("journal_mode = WAL");
+const db = new Database(DB_PATH, { create: true });
+db.exec("PRAGMA journal_mode = WAL");
 
 // ─── Module 1: Channel Backup ───
 db.exec(`

@@ -1,14 +1,14 @@
-import Database from "better-sqlite3";
+import { Database } from "bun:sqlite";
 import { resolve } from "path";
 
 const DB_PATH = resolve(import.meta.dir, "../data/bot.db");
 
-let _db: Database.Database | null = null;
+let _db: Database | null = null;
 
-export function getDb(): Database.Database {
+export function getDb(): Database {
   if (!_db) {
-    _db = new Database(DB_PATH);
-    _db.pragma("journal_mode = WAL");
+    _db = new Database(DB_PATH, { create: true });
+    _db.exec("PRAGMA journal_mode = WAL");
   }
   return _db;
 }
