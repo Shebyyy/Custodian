@@ -1,14 +1,20 @@
 // @ts-nocheck — discord.js type quirks with bun
-import { Client, GuildMember } from "discord.js";
+import { Client } from "discord.js";
 import { getDb } from "../db.js";
-import { getConfig } from "../config.js";
-import { getValidAccessToken, addUserToGuild, sleep } from "../utils.js";
+import { getValidAccessToken, addUserToGuild, sleep, DEFAULT_RATE_LIMITS } from "../utils.js";
 
 /**
  * Module 5 — Migration (OAuth2 Direct Add)
  *
  * Uses stored OAuth2 tokens to directly add users to a new server.
  * No invite links needed — bot calls PUT /guilds/{guild.id}/members/{user.id}
+ *
+ * Rate limit handling:
+ *   - 1.5s delay between each user add
+ *   - Processes in batches of 10, pauses 3s between batches
+ *   - On 429 (rate limited): stops the entire migration
+ *   - On 401/403/404 (fatal): skips that user, continues
+ *   - Uses rateLimitedFetch internally for automatic 429 retry
  *
  * Commands:
  * - /migrate-add <guild-id> — Add all authorized users to target server
@@ -27,21 +33,32 @@ export class MigrationModule {
    */
   async migrateAdd(guildId: string, roleId?: string): Promise<string> {
     const db = getDb();
-    const config = getConfig();
     const tokens = db.prepare("SELECT user_id FROM oauth_tokens").all() as any[];
 
     if (!tokens.length) {
       return "⚠️ No authorized users found. Users need to authorize the bot via the verification channel first.";
     }
 
+    const rl = DEFAULT_RATE_LIMITS;
     let added = 0;
     let failed = 0;
     let already = 0;
+    let rateLimited = false;
     const failedList: string[] = [];
     const expiredList: string[] = [];
+    const fatalList: string[] = [];
 
-    for (const row of tokens) {
+    console.log(`[Migration] Starting migration of ${tokens.length} users to ${guildId}`);
+
+    for (let i = 0; i < tokens.length; i++) {
+      const row = tokens[i];
       const userId = row.user_id;
+
+      // ── Batch pause: every batchSize users, wait extra ──
+      if (i > 0 && i % rl.batchSize === 0) {
+        console.log(`[Migration] Batch pause at user ${i}/${tokens.length} — waiting ${rl.batchPauseMs}ms`);
+        await sleep(rl.batchPauseMs);
+      }
 
       try {
         // Check if already in target guild
@@ -66,39 +83,64 @@ export class MigrationModule {
 
         // Add user to guild
         const roles = roleId ? [roleId] : undefined;
-        const success = await addUserToGuild(userId, guildId, accessToken, roles);
+        const result = await addUserToGuild(userId, guildId, accessToken, roles);
 
-        if (success) {
+        if (result.success) {
           added++;
-          console.log(`✅ Added ${userId} to ${guildId}`);
-        } else {
-          failedList.push(userId);
+        } else if (result.reason === "rate_limited") {
+          // 429 after retries — STOP the whole migration
+          rateLimited = true;
           failed++;
+          failedList.push(userId);
+          console.error(`[Migration] Rate limited at user ${i + 1}/${tokens.length} — stopping migration`);
+          break;
+        } else if (result.reason === "fatal") {
+          // 401/403/404 — skip, don't retry
+          failed++;
+          if (result.status === 401) {
+            expiredList.push(userId);
+          } else {
+            fatalList.push(userId);
+          }
+        } else {
+          // Other error
+          failed++;
+          failedList.push(userId);
         }
       } catch (err: any) {
-        console.error(`Error migrating ${userId}:`, err.message);
+        console.error(`[Migration] Error migrating ${userId}:`, err.message);
         failedList.push(userId);
         failed++;
       }
 
-      await sleep(config.rateLimits.messagePostDelayMs);
+      // ── Delay between each user add ──
+      await sleep(rl.migrationDelayMs);
     }
 
+    // ── Build report ──
     let msg = `🚀 **Migration Complete:**\n\n` +
-      `✅ **${added}** added to new server\n` +
-      `🔄 **${already}** already in server\n`;
+      `✅ **${added}** added to server\n` +
+      `🔄 **${already}** already in server\n` +
+      `❌ **${failed}** failed\n`;
 
-    if (failed > 0) {
-      msg += `❌ **${failed}** failed\n`;
-      if (expiredList.length) {
-        msg += `\n⚠️ **Token expired (need re-auth):**\n${expiredList.map((id) => `• <@${id}>`).join("\n")}\n`;
-      }
-      if (failedList.filter((id) => !expiredList.includes(id)).length) {
-        const other = failedList.filter((id) => !expiredList.includes(id));
-        msg += `\n❌ **Other failures:**\n${other.map((id) => `• <@${id}>`).join("\n")}\n`;
-      }
+    if (rateLimited) {
+      msg += `\n⏳ **Migration stopped early — Discord rate limited us.**\nWait a few minutes and run again. Remaining users will be retried.\n`;
     }
 
+    if (expiredList.length) {
+      msg += `\n⚠️ **Token expired/invalid (need re-auth):**\n${expiredList.map((id) => `• <@${id}>`).join("\n")}\n`;
+    }
+
+    if (fatalList.length) {
+      msg += `\n⛔ **Fatal errors (403/404 — skipped):**\n${fatalList.map((id) => `• <@${id}>`).join("\n")}\n`;
+    }
+
+    const otherFailed = failedList.filter((id) => !expiredList.includes(id) && !fatalList.includes(id));
+    if (otherFailed.length) {
+      msg += `\n❌ **Other failures:**\n${otherFailed.map((id) => `• <@${id}>`).join("\n")}\n`;
+    }
+
+    console.log(`[Migration] Done: ${added} added, ${already} skipped, ${failed} failed, rateLimited=${rateLimited}`);
     return msg;
   }
 

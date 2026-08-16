@@ -2,11 +2,15 @@
 import { Client, ChannelType, TextChannel, ForumChannel } from "discord.js";
 import { getDb } from "../db.js";
 import { getConfig, loadChannelMappings, saveChannelMappings, ChannelMapping } from "../config.js";
-import { sleep } from "../utils.js";
+import { sleep, DEFAULT_RATE_LIMITS } from "../utils.js";
 
 /**
  * Module 4 — Restore & Channel Mapping
  * Map old channels to new, restore messages via webhooks.
+ *
+ * Rate limit handling:
+ *   - 1s delay between each message post (discord.js handles most limits,
+ *     but we add a safety delay for webhook sends during bulk restore)
  */
 interface StoredMessage {
   message_id: string; channel_id: string; author_id: string; author_username: string;
@@ -67,12 +71,15 @@ export class RestoreModule {
     const res = db.prepare("INSERT INTO restore_runs (source_channel_id, target_channel_id, total_messages, status, started_at) VALUES (?, ?, ?, 'running', datetime('now'))").run(source, mapping.targetChannelId, messages.length);
     const runId = Number(res.lastInsertRowid);
 
+    // Use our safe default delay instead of the non-existent config.rateLimits
+    const delay = DEFAULT_RATE_LIMITS.restoreDelayMs;
     let restored = 0;
+
     try {
       if (mapping.isForum && targetChannel.type === ChannelType.GuildForum)
-        restored = await this.restoreForum(targetChannel as ForumChannel, messages, config.rateLimits.messagePostDelayMs);
+        restored = await this.restoreForum(targetChannel as ForumChannel, messages, delay);
       else
-        restored = await this.restoreText(targetChannel as TextChannel, messages, config.rateLimits.messagePostDelayMs);
+        restored = await this.restoreText(targetChannel as TextChannel, messages, delay);
     } catch (e) { console.error("Restore error:", e); }
 
     db.prepare("UPDATE restore_runs SET restored_messages = ?, status = 'completed', completed_at = datetime('now') WHERE id = ?").run(restored, runId);
