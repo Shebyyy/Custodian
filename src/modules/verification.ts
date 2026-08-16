@@ -197,7 +197,7 @@ export class VerificationModule {
       if (
         userAns === q.correctAnswer.toLowerCase() ||
         userAns === String(correctIdx) ||
-        userAns === String.fromCharCode(65 + correctIdx)
+        userAns === String.fromCharCode(65 + correctIdx).toLowerCase()
       ) {
         correct++;
       }
