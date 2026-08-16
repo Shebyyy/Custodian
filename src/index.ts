@@ -35,11 +35,9 @@ const restoreModule = new RestoreModule(client);
 const migrationModule = new MigrationModule(client);
 
 // ─── Slash Commands ───
-const setupCmds = getSetupCommands();
-
 const commands = [
-  // Setup (per-guild)
-  new SlashCommandBuilder().setName(setupCmds[0].name).setDescription(setupCmds[0].description),
+  // Setup (per-guild) — uses role/channel pickers
+  ...getSetupCommands(),
 
   // Module 1: Backup (per-guild)
   new SlashCommandBuilder().setName("backup-add").setDescription("Register a channel for backup")
