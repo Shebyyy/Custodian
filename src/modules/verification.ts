@@ -65,16 +65,13 @@ export class VerificationModule {
       // Log to logs channel
       await this.sendLog(guildId, `👤 **${member.user.username}** (<@${member.user.id}>) joined — assigned Unverified role`);
 
-      // Brief welcome — point to verification channel
+      // DM the user — only they see it
       try {
-        const channel = await this.client.channels.fetch(config.channels.verification);
-        if (channel && channel.isTextBased()) {
-          await (channel as TextChannel).send(
-            `👋 Welcome <@${member.user.id}>! Please read the rules above and click **✅ Verify Me** below to get full access.`
-          );
-        }
-      } catch (err) {
-        console.error(`[${guildId}] Failed to post welcome for ${member.user.username}:`, err);
+        await member.send(
+          `👋 Welcome to **${member.guild.name}**!\n\nPlease read the rules in <#${config.channels.verification}> and click **✅ Verify Me** to get full access.`
+        );
+      } catch {
+        // DMs closed — silent fail
       }
     });
 
