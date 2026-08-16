@@ -13,17 +13,32 @@ import { getOAuth2Url, hasValidToken, truncate } from "../utils.js";
  *
  * Each guild has its own config. When a member joins:
  * 1. Bot assigns Unverified role (from that guild's config)
- * 2. Posts in #verification channel with Authorize + Verify buttons
+ * 2. Posts in verification channel with rules + Authorize + Verify buttons
  * 3. User authorizes bot (OAuth2 guilds.join scope) → stores token
  * 4. User takes quiz → pass → Verified role, fail → retry
+ *
+ * All detailed logs (pass/fail with wrong answers, flagged users) go to logs channel.
  */
 export class VerificationModule {
   private client: Client;
-  private quizInProgress = new Map<string, { questionIndex: number; answers: Record<number, string>; channelId: string; guildId: string }>();
 
   constructor(client: Client) {
     this.client = client;
     this.setupListeners();
+  }
+
+  /** Send a log message to the logs channel for this guild */
+  private async sendLog(guildId: string, content: string): Promise<void> {
+    try {
+      const config = getGuildConfig(guildId);
+      if (!config.channels.logs) return;
+      const channel = await this.client.channels.fetch(config.channels.logs);
+      if (channel && channel.isTextBased()) {
+        await (channel as TextChannel).send(content);
+      }
+    } catch (err) {
+      console.error(`[${guildId}] Failed to send log:`, err);
+    }
   }
 
   private setupListeners() {
@@ -45,7 +60,10 @@ export class VerificationModule {
       getDb().prepare("INSERT OR IGNORE INTO verifications (user_id, guild_id, status) VALUES (?, ?, 'pending')")
         .run(member.user.id, guildId);
 
-      // Post verification message
+      // Log to logs channel
+      await this.sendLog(guildId, `👤 **${member.user.username}** (${member.user.id}) joined — assigned Unverified role`);
+
+      // Post verification message in verification channel
       try {
         const channel = await this.client.channels.fetch(config.channels.verification);
         if (!channel || !channel.isTextBased()) return;
@@ -59,16 +77,19 @@ export class VerificationModule {
             .setStyle(ButtonStyle.Link)
         );
 
-        const row2 = new ActionRowBuilder<ButtonBuilder>().addComponents(
+        const row2 = new ActionRowBuilder<TextInputBuilder>() as any;
+        const row2b = new ActionRowBuilder<ButtonBuilder>().addComponents(
           new ButtonBuilder()
             .setCustomId(`verify_start:${member.user.id}:${guildId}`)
             .setLabel("✅ Verify Me")
             .setStyle(ButtonStyle.Success)
         );
 
+        const rules = config.termsAndConditions || "No rules set. Admin should use /set-rules.";
+
         await (channel as TextChannel).send({
-          content: `👋 Welcome **${member.user.username}**!\n\nPlease complete these steps to get full access:\n\n1️⃣ Click **🔗 Authorize Bot**\n2️⃣ Click **✅ Verify Me**`,
-          components: [row1, row2],
+          content: `👋 Welcome **${member.user.username}**!\n\n📜 **Server Rules:**\n${rules}\n\n───\n\nTo get full access:\n1️⃣ Click **🔗 Authorize Bot**\n2️⃣ Click **✅ Verify Me** — you'll get a quiz based on the rules above`,
+          components: [row1, row2b],
         });
       } catch (err) {
         console.error(`[${guildId}] Failed to post verification message for ${member.user.username}:`, err);
@@ -140,10 +161,10 @@ export class VerificationModule {
       for (const q of config.quiz.questions) {
         answers[q.id - 1] = interaction.fields.getTextInputValue(`q_${q.id}`).trim();
       }
-      console.log(`[Quiz] User ${userId} answers:`, JSON.stringify(answers), "Questions:", JSON.stringify(config.quiz.questions.map(q => ({id:q.id, correct:q.correctAnswer, options:q.options}))));
+      console.log(`[Quiz] User ${userId} answers:`, JSON.stringify(answers), "Questions:", JSON.stringify(config.quiz.questions.map(q => ({ id: q.id, correct: q.correctAnswer, options: q.options }))));
 
       await interaction.reply({ content: "✅ All answers submitted! Grading...", ephemeral: true });
-      setTimeout(() => this.grade(userId, guildId, interaction, answers, interaction.channelId), 500);
+      setTimeout(() => this.grade(userId, guildId, interaction, answers), 500);
     });
   }
 
@@ -186,10 +207,11 @@ export class VerificationModule {
     }
   }
 
-  private async grade(userId: string, guildId: string, interaction: any, answers: Record<number, string>, channelId: string) {
+  private async grade(userId: string, guildId: string, interaction: any, answers: Record<number, string>) {
     const config = getGuildConfig(guildId);
     const db = getDb();
     let correct = 0;
+    const wrongQuestions: string[] = [];
 
     for (const q of config.quiz.questions) {
       const userAns = (answers[q.id - 1] || "").trim().toLowerCase();
@@ -200,6 +222,14 @@ export class VerificationModule {
         userAns === String.fromCharCode(65 + correctIdx).toLowerCase()
       ) {
         correct++;
+      } else {
+        // Track what they got wrong
+        const correctLetter = String.fromCharCode(65 + correctIdx);
+        wrongQuestions.push(
+          `❌ **Q${q.id}: ${q.question}**\n` +
+          `   Their answer: **${answers[q.id - 1] || "(empty)"}**\n` +
+          `   Correct answer: **${correctLetter}. ${q.correctAnswer}**`
+        );
       }
     }
 
@@ -208,6 +238,7 @@ export class VerificationModule {
     const passed = pct >= config.quiz.passPercentage;
     const record = db.prepare("SELECT attempts FROM verifications WHERE user_id = ? AND guild_id = ?").get(userId, guildId) as any;
     const newAttempts = (record?.attempts || 0) + 1;
+    const username = interaction.user?.username || userId;
 
     try {
       if (passed) {
@@ -219,36 +250,50 @@ export class VerificationModule {
         await member.roles.add(config.roles.verified);
         await member.roles.remove(config.roles.unverified);
 
-        const channel = await this.client.channels.fetch(channelId).catch(() => null);
-        if (channel && channel.isTextBased()) {
-          await (channel as any).send(`✅ **${interaction.user.username}** passed the verification quiz! (${correct}/${total} — ${pct}%)`);
-        }
+        // Detailed log to logs channel
+        await this.sendLog(guildId,
+          `✅ **${username}** (<@${userId}>) **PASSED verification!**\n` +
+          `📊 Score: **${correct}/${total} (${pct}%)** — Attempt #${newAttempts}\n` +
+          `🎖️ Verified role assigned, Unverified role removed`
+        );
 
         await interaction.followUp({ content: `🎉 **Passed!** ${correct}/${total} (${pct}%). You now have full access!`, ephemeral: true });
       } else {
         db.prepare("UPDATE verifications SET status = 'failed', attempts = ?, score = ?, answers_json = ? WHERE user_id = ? AND guild_id = ?")
           .run(newAttempts, pct, JSON.stringify(answers), userId, guildId);
 
-        if (newAttempts < config.quiz.maxAttempts) {
-          const remaining = config.quiz.maxAttempts - newAttempts;
+        // Detailed log to logs channel with wrong answers
+        const wrongBlock = wrongQuestions.length > 0
+          ? `\n\n**Wrong answers:**\n${wrongQuestions.join("\n\n")}`
+          : "";
+        const remaining = config.quiz.maxAttempts - newAttempts;
+
+        if (remaining > 0) {
+          await this.sendLog(guildId,
+            `❌ **${username}** (<@${userId}>) **FAILED verification**\n` +
+            `📊 Score: **${correct}/${total} (${pct}%)** — Attempt #${newAttempts}/${config.quiz.maxAttempts}\n` +
+            `${remaining} attempt${remaining > 1 ? "s" : ""} remaining` +
+            wrongBlock
+          );
           await interaction.followUp({
             content: `❌ **Failed** — ${correct}/${total} (${pct}%). Need ${config.quiz.passPercentage}%.\n${remaining} attempt${remaining > 1 ? "s" : ""} remaining.`,
             ephemeral: true,
           });
         } else {
           db.prepare("UPDATE verifications SET status = 'flagged_review' WHERE user_id = ? AND guild_id = ?").run(userId, guildId);
-          const channel = await this.client.channels.fetch(channelId).catch(() => null);
-          if (channel && channel.isTextBased()) {
-            await (channel as any).send(`⚠️ **${interaction.user.username}** failed verification ${newAttempts} times. Flagged for admin review.`);
-          }
+
+          await this.sendLog(guildId,
+            `⚠️ **${username}** (<@${userId}>) **EXHAUSTED all ${config.quiz.maxAttempts} attempts**\n` +
+            `📊 Final score: **${correct}/${total} (${pct}%)**\n` +
+            `🚩 Flagged for admin review` +
+            wrongBlock
+          );
           await interaction.followUp({ content: "❌ Max attempts reached. An admin will review your case.", ephemeral: true });
         }
       }
     } catch (err) {
       console.error("Grade error:", err);
     }
-
-    this.quizInProgress.delete(`${userId}:${guildId}`);
   }
 
   // ─── Commands ───
@@ -271,6 +316,12 @@ export class VerificationModule {
       await member.roles.add(config.roles.verified);
       await member.roles.remove(config.roles.unverified);
       getDb().prepare("UPDATE verifications SET status = 'verified', quiz_passed_at = datetime('now') WHERE user_id = ? AND guild_id = ?").run(userId, guildId);
+
+      // Log to logs channel
+      await this.sendLog(guildId,
+        `🛡️ **${member.user.username}** (<@${userId}>) manually verified by admin`
+      );
+
       return `✅ <@${userId}> manually verified`;
     } catch {
       return `❌ Could not verify <@${userId}>`;

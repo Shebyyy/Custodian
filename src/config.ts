@@ -37,7 +37,7 @@ export interface GlobalConfig {
 export interface GuildConfig {
   guildId: string;
   roles: { unverified: string; verified: string; admin: string };
-  channels: { welcome: string; rules: string; verification: string };
+  channels: { verification: string; logs: string };
   quiz: {
     maxAttempts: number;
     passPercentage: number;
@@ -93,11 +93,7 @@ export function setClientId(clientId: string): void {
 
 // ─── Per-Guild Config (from DB) ───
 
-const defaultQuiz: QuizQuestion[] = [
-  { id: 1, question: "Is it okay to spam in any channel?", type: "yes_no", options: ["Yes", "No"], correctAnswer: "No" },
-  { id: 2, question: "Should you be respectful to all members?", type: "yes_no", options: ["Yes", "No"], correctAnswer: "Yes" },
-  { id: 3, question: "Is NSFW content allowed?", type: "yes_no", options: ["Yes", "No"], correctAnswer: "No" },
-];
+const defaultQuiz: QuizQuestion[] = [];
 
 const defaultTerms = "## Server Rules\n\n1. Be respectful to all members.\n2. No spam, self-promotion, or unsolicited DMs.\n3. No NSFW or offensive content.\n4. Follow Discord's Terms of Service.\n5. Listen to staff — their decisions are final.\n6. Use channels for their intended purpose.\n\n**Breaking these rules may result in warnings, kicks, or bans.**";
 
@@ -111,7 +107,7 @@ export function getGuildConfig(guildId: string): GuildConfig {
     return {
       guildId,
       roles: { unverified: "", verified: "", admin: "" },
-      channels: { welcome: "", rules: "", verification: "" },
+      channels: { verification: "", logs: "" },
       quiz: { maxAttempts: 3, passPercentage: 80, questions: defaultQuiz },
       termsAndConditions: defaultTerms,
       isSetup: false,
@@ -121,7 +117,11 @@ export function getGuildConfig(guildId: string): GuildConfig {
   return {
     guildId,
     roles: row.roles_json ? JSON.parse(row.roles_json) : { unverified: "", verified: "", admin: "" },
-    channels: row.channels_json ? JSON.parse(row.channels_json) : { welcome: "", rules: "", verification: "" },
+    channels: (() => {
+      if (!row.channels_json) return { verification: "", logs: "" };
+      const c = JSON.parse(row.channels_json);
+      return { verification: c.verification || "", logs: c.logs || "" };
+    })(),
     quiz: {
       maxAttempts: row.max_attempts || 3,
       passPercentage: row.pass_percentage || 80,

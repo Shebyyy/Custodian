@@ -11,6 +11,13 @@ import { VerificationModule } from "./modules/verification.js";
 import { RestoreModule } from "./modules/restore.js";
 import { MigrationModule } from "./modules/migration.js";
 import { getSetupCommands, handleSetupCommand, handleSetupInteraction } from "./commands/setup.js";
+import {
+  getRulesCommand, handleRulesCommand,
+  getQuizAddCommand, handleQuizAddCommand,
+  getQuizListCommand, handleQuizListCommand,
+  getQuizRemoveCommand, handleQuizRemoveCommand,
+  handleManagementModal,
+} from "./commands/quiz-management.js";
 
 // ─── Load Global Config ───
 const globalConfig = getGlobalConfig();
@@ -56,6 +63,12 @@ const commands = [
   new SlashCommandBuilder().setName("verify-manual").setDescription("Manually verify a user")
     .addUserOption((o) => o.setName("user").setDescription("User to verify").setRequired(true)),
   new SlashCommandBuilder().setName("verify-flagged").setDescription("View users flagged for review"),
+
+  // Rules & Quiz management (admin)
+  getRulesCommand(),
+  getQuizAddCommand(),
+  getQuizListCommand(),
+  getQuizRemoveCommand(),
 
   // Module 5: Migration (global — tokens work across servers)
   new SlashCommandBuilder().setName("migrate-add").setDescription("Add authorized users to a server directly")
@@ -129,14 +142,16 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
   if (interaction.isModalSubmit()) {
     const handled = await handleSetupInteraction(interaction, client);
     if (handled) return;
+    const handled2 = await handleManagementModal(interaction, client);
+    if (handled2) return;
   }
 
   if (!interaction.isChatInputCommand()) return;
   const { commandName, options } = interaction;
   const guildId = interaction.guild?.id || "";
 
-  // Don't deferReply for setup — it shows its own modal
-  if (commandName !== "setup") {
+  // Don't deferReply for commands that show their own modal
+  if (commandName !== "setup" && commandName !== "set-rules" && commandName !== "quiz-add") {
     await interaction.deferReply({ ephemeral: true }).catch(() => {});
   }
 
@@ -192,6 +207,20 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
       }
       case "verify-flagged":
         await interaction.editReply(verification.getFlagged(guildId));
+        break;
+
+      // ── Rules & Quiz Management (admin) ──
+      case "set-rules":
+        await handleRulesCommand(interaction, client);
+        break;
+      case "quiz-add":
+        await handleQuizAddCommand(interaction, client);
+        break;
+      case "quiz-list":
+        await handleQuizListCommand(interaction, client);
+        break;
+      case "quiz-remove":
+        await handleQuizRemoveCommand(interaction, client);
         break;
 
       // ── Module 5: Migration (global) ──
