@@ -10,6 +10,71 @@ mkdirSync(resolve(import.meta.dir, "../data"), { recursive: true });
 const db = new Database(DB_PATH, { create: true });
 db.exec("PRAGMA journal_mode = WAL");
 
+// ─── Migration: Add guild_id to old tables (multi-server refactor) ───
+// Old databases were created before the per-guild refactor.
+// CREATE TABLE IF NOT EXISTS won't add new columns to existing tables.
+// We need to ALTER TABLE ADD COLUMN for each missing guild_id.
+
+function migrateAddColumn(table: string, column: string, type: string, defaultValue: string = "''"): void {
+  try {
+    // Check if column exists
+    const cols = db.prepare(`PRAGMA table_info(${table})`).all() as any[];
+    const exists = cols.some((c: any) => c.name === column);
+    if (!exists) {
+      db.prepare(`ALTER TABLE ${table} ADD COLUMN ${column} ${type} NOT NULL DEFAULT ${defaultValue}`).run();
+      console.log(`  ↳ Added column ${column} to ${table}`);
+    }
+  } catch (err: any) {
+    // Column might already exist or table doesn't exist — that's fine
+    if (!err.message.includes("duplicate column")) {
+      console.warn(`  ⚠ Could not add ${column} to ${table}: ${err.message}`);
+    }
+  }
+}
+
+function migrateDropIndex(table: string, indexName: string): void {
+  try {
+    db.prepare(`DROP INDEX IF EXISTS ${indexName}`).run();
+  } catch {}
+}
+
+console.log("[Migration] Checking for missing columns...");
+
+// backup_channels: add guild_id
+migrateAddColumn("backup_channels", "guild_id", "TEXT");
+
+// messages: add guild_id
+migrateAddColumn("messages", "guild_id", "TEXT");
+
+// members: add guild_id
+migrateAddColumn("members", "guild_id", "TEXT");
+
+// Drop old single-column unique indexes and recreate as composite (user_id, guild_id)
+try {
+  const memberIdxs = db.prepare("PRAGMA index_list(members)").all() as any[];
+  const oldMemberIdx = memberIdxs.find((i: any) => i.name === "idx_members_unique");
+  if (oldMemberIdx) {
+    const idxInfo = db.prepare(`PRAGMA index_info(idx_members_unique)`).all() as any[];
+    if (idxInfo.length === 1) {
+      // Old single-column index — drop and recreate as composite
+      db.prepare("DROP INDEX IF EXISTS idx_members_unique").run();
+      console.log("  ↳ Dropped old idx_members_unique (single column)");
+    }
+  }
+} catch {}
+
+try {
+  const verifIdxs = db.prepare("PRAGMA index_list(verifications)").all() as any[];
+  const oldVerifIdx = verifIdxs.find((i: any) => i.name === "idx_verifications_unique");
+  if (oldVerifIdx) {
+    const idxInfo = db.prepare(`PRAGMA index_info(idx_verifications_unique)`).all() as any[];
+    if (idxInfo.length === 1) {
+      db.prepare("DROP INDEX IF EXISTS idx_verifications_unique").run();
+      console.log("  ↳ Dropped old idx_verifications_unique (single column)");
+    }
+  }
+} catch {}
+
 // ─── Per-Guild Config ───
 db.exec(`
   CREATE TABLE IF NOT EXISTS guild_configs (
