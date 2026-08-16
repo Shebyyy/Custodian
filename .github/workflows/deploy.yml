@@ -42,7 +42,7 @@ jobs:
             if [ -d /root/Custodian/.git ]; then
               cd /root/Custodian
               git fetch origin main
-              git clean -fd
+              git clean -fd --exclude=data
               git reset --hard origin/main
             else
               rm -rf /root/Custodian
