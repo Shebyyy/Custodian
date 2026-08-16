@@ -15,20 +15,28 @@ jobs:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           password: ${{ secrets.SERVER_PASSWORD }}
-          command_timeout: 120s
+          command_timeout: 180s
           script_stop: false
           script: |
             set -e
             echo "=== Deploying Custodian (main) ==="
 
-            # Check prerequisites
-            echo "[1/6] Checking prerequisites..."
+            # Install bun if missing
+            echo "[1/7] Checking prerequisites..."
             which git || { echo "ERROR: git not installed"; exit 1; }
-            which bun || { echo "ERROR: bun not installed"; exit 1; }
+            if ! which bun; then
+              echo "Installing bun..."
+              curl -fsSL https://bun.sh/install | bash
+              export PATH="$HOME/.bun/bin:$PATH"
+              echo "OK: bun installed"
+            else
+              export PATH="$HOME/.bun/bin:$PATH"
+              echo "OK: bun already installed"
+            fi
             echo "OK: git, bun available"
 
             # Clone or pull
-            echo "[2/6] Fetching code..."
+            echo "[2/7] Fetching code..."
             if [ -d /root/Custodian/.git ]; then
               cd /root/Custodian
               git fetch origin main
@@ -41,21 +49,27 @@ jobs:
             echo "OK: code fetched"
 
             # Install deps
-            echo "[3/6] Installing dependencies..."
+            echo "[3/7] Installing dependencies..."
             cd /root/Custodian
-            /root/.bun/bin/bun install
+            bun install
             echo "OK: deps installed"
 
             # Write .env from secrets
-            echo "[4/6] Writing .env..."
+            echo "[4/7] Writing .env..."
             printf 'DISCORD_BOT_TOKEN=%s\n' \
               '${{ secrets.DISCORD_BOT_TOKEN }}' \
               > /root/Custodian/.env
             chmod 600 /root/Custodian/.env
             echo "OK: .env written"
 
+            # Setup database
+            echo "[5/7] Setting up database..."
+            cd /root/Custodian
+            bun run db:setup
+            echo "OK: database ready"
+
             # Kill old process
-            echo "[5/6] Restarting bot..."
+            echo "[6/7] Restarting bot..."
             if [ -f /root/Custodian/data/bot.pid ]; then
               kill $(cat /root/Custodian/data/bot.pid) 2>/dev/null || true
               rm -f /root/Custodian/data/bot.pid
@@ -64,12 +78,12 @@ jobs:
 
             # Start
             mkdir -p /root/Custodian/data
-            setsid /root/.bun/bin/bun run /root/Custodian/src/index.ts > /root/Custodian/data/bot.log 2>&1 &
+            setsid bun run /root/Custodian/src/index.ts > /root/Custodian/data/bot.log 2>&1 &
             echo $! > /root/Custodian/data/bot.pid
             sleep 5
 
             # Health check
-            echo "[6/6] Health check..."
+            echo "[7/7] Health check..."
             if kill -0 $(cat /root/Custodian/data/bot.pid) 2>/dev/null; then
               echo "✅ Custodian is running (PID: $(cat /root/Custodian/data/bot.pid))"
             else
