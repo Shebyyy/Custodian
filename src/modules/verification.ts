@@ -51,7 +51,6 @@ export class VerificationModule {
         if (!channel || !channel.isTextBased()) return;
 
         const authUrl = this.buildAuthUrl(member.user.id);
-        const isAuthorized = hasValidToken(member.user.id);
 
         const row1 = new ActionRowBuilder<ButtonBuilder>().addComponents(
           new ButtonBuilder()
@@ -63,20 +62,12 @@ export class VerificationModule {
         const row2 = new ActionRowBuilder<ButtonBuilder>().addComponents(
           new ButtonBuilder()
             .setCustomId(`verify_start:${member.user.id}:${guildId}`)
-            .setLabel(isAuthorized ? "✅ Verify Me" : "🔒 Verify Me (Authorize First)")
-            .setStyle(isAuthorized ? ButtonStyle.Success : ButtonStyle.Secondary)
-            .setDisabled(!isAuthorized),
+            .setLabel("✅ Verify Me")
+            .setStyle(ButtonStyle.Success)
         );
 
-        let statusNote = "";
-        if (isAuthorized) {
-          statusNote = "\n\n✅ *Bot authorized! Click **Verify Me** to take the quiz.*";
-        } else {
-          statusNote = "\n\n🔗 *Click **Authorize Bot** first, then **Verify Me** will unlock.*";
-        }
-
         await (channel as TextChannel).send({
-          content: `👋 Welcome **${member.user.username}**!\n\nPlease complete these steps to get full access:${statusNote}`,
+          content: `👋 Welcome **${member.user.username}**!\n\nPlease complete these steps to get full access:\n\n1️⃣ Click **🔗 Authorize Bot**\n2️⃣ Click **✅ Verify Me**`,
           components: [row1, row2],
         });
       } catch (err) {
@@ -116,7 +107,7 @@ export class VerificationModule {
 
       if (!hasValidToken(targetUserId)) {
         await interaction.reply({
-          content: "🔒 Please click **🔗 Authorize Bot** first!",
+          content: "🔒 You haven't authorized the bot yet!\n\n1. Click **🔗 Authorize Bot** above\n2. Then click **✅ Verify Me** again",
           ephemeral: true,
         });
         return;
