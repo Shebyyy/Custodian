@@ -88,6 +88,15 @@ client.once(Events.ClientReady, async () => {
   }
 
   try {
+    // Clear stale guild-specific commands (from accidental per-guild registration)
+    for (const [id, guild] of client.guilds.cache) {
+      const existing = await guild.commands.fetch().catch(() => []);
+      if (existing.size > 0) {
+        await guild.commands.set([]);
+        console.log(`🧹 Cleared ${existing.size} stale guild commands in ${guild.name}`);
+      }
+    }
+    // Register global commands (works for all servers)
     await client.application?.commands.set(commands as any);
     console.log(`📝 ${commands.length} slash commands registered`);
   } catch (err) {
