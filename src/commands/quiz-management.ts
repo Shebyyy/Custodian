@@ -1,10 +1,11 @@
 // @ts-nocheck — discord.js type quirks with bun
 import {
   Client, CommandInteraction, Interaction, ModalBuilder,
-  ActionRowBuilder, TextInputBuilder, TextInputStyle,
+  ActionRowBuilder, ButtonBuilder, ButtonStyle, TextInputBuilder, TextInputStyle,
   SlashCommandBuilder, PermissionFlagsBits,
 } from "discord.js";
 import { getGuildConfig, saveGuildConfig, QuizQuestion } from "../config.js";
+import { getOAuth2Url } from "../utils.js";
 
 // ─── /post-verify ───
 export function getPostVerifyCommand() {
@@ -26,6 +27,10 @@ export async function handlePostVerifyCommand(interaction: CommandInteraction, c
   const { ActionRowBuilder: Arb, ButtonBuilder, ButtonStyle } = await import("discord.js");
 
   const row = new Arb<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setURL(getOAuth2Url())
+      .setLabel("🔗 Authorize Bot")
+      .setStyle(ButtonStyle.Link),
     new ButtonBuilder()
       .setCustomId(`verify_start:${guildId}`)
       .setLabel("✅ Verify Me")

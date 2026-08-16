@@ -3,7 +3,7 @@ import { exchangeCode, storeOAuthToken, truncate } from "./utils.js";
 
 /**
  * Tiny HTTP server that handles the OAuth2 callback.
- * User clicks Authorize → Discord redirects here with a code → we exchange for token.
+ * User clicks Authorize → Discord redirects here with a code → we exchange for token → fetch userId from token.
  * No webpage — just plain text responses.
  *
  * Runs on port 4000 alongside the Discord bot.
@@ -27,27 +27,36 @@ try {
       // OAuth2 callback — Discord redirects here after user authorizes
       if (url.pathname === "/oauth/callback") {
         const code = url.searchParams.get("code");
-        const state = url.searchParams.get("state"); // state = userId
 
-        if (!code || !state) {
-          return new Response("❌ Missing code or state parameter.", { status: 400 });
+        if (!code) {
+          return new Response("❌ Missing code parameter.", { status: 400 });
         }
 
         try {
           // Exchange code for access token
           const tokens = await exchangeCode(code);
 
-          // Store in database
-          storeOAuthToken(state, tokens.access_token, tokens.refresh_token, tokens.expires_in, tokens.scope);
+          // Get user ID from the access token
+          const userRes = await fetch("https://discord.com/api/users/@me", {
+            headers: { Authorization: `Bearer ${tokens.access_token}` },
+          });
+          const userData = await userRes.json() as any;
 
-          console.log(`✅ OAuth2 token stored for user ${state}`);
+          if (!userData.id) {
+            return new Response("❌ Could not identify your Discord account.", { status: 400 });
+          }
+
+          // Store in database using the actual user ID from Discord
+          storeOAuthToken(userData.id, tokens.access_token, tokens.refresh_token, tokens.expires_in, tokens.scope);
+
+          console.log(`✅ OAuth2 token stored for user ${userData.username} (${userData.id})`);
 
           return new Response(
-            `✅ Authorized! You can close this tab now.\n\nCustodian can now add you to servers when needed. Go back to Discord.`,
+            `✅ Authorized as **${userData.username}**! You can close this tab now.\n\nCustodian can now add you to servers when needed. Go back to Discord.`,
             { status: 200, headers: { "Content-Type": "text/plain; charset=utf-8" } }
           );
         } catch (err: any) {
-          console.error(`❌ OAuth2 callback error for ${state}:`, err.message);
+          console.error(`❌ OAuth2 callback error:`, err.message);
           return new Response(
             `❌ Authorization failed: ${truncate(err.message, 200)}\n\nTry again or contact an admin.`,
             { status: 500, headers: { "Content-Type": "text/plain; charset=utf-8" } }
@@ -65,7 +74,6 @@ try {
   if (err.code === "EADDRINUSE") {
     console.error(`❌ OAuth2 callback server failed — port ${CALLBACK_PORT} is already in use.`);
     console.error("   Another instance of the bot may be running. Kill it and try again.");
-    // Don't crash the whole bot — just skip the OAuth server
   } else {
     console.error(`❌ OAuth2 callback server failed: ${err.message}`);
   }

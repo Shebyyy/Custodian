@@ -116,7 +116,7 @@ const DISCORD_API = "https://discord.com/api/v10";
  * Opens Discord's own authorization page (not our page).
  * After user allows, Discord redirects to our callback with a code.
  */
-export function getOAuth2Url(userId: string, guildId?: string): string {
+export function getOAuth2Url(userId?: string, guildId?: string): string {
   const config = getConfig();
   const clientId = config.clientId;
 
@@ -129,9 +129,11 @@ export function getOAuth2Url(userId: string, guildId?: string): string {
     redirect_uri: config.oauth2.redirectUri,
     response_type: "code",
     scope: "identify guilds.join",
-    state: userId,
   });
 
+  if (userId) {
+    params.set("state", userId);
+  }
   if (guildId) {
     params.set("guild_id", guildId);
   }
