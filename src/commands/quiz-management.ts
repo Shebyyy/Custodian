@@ -5,22 +5,23 @@ import {
   SlashCommandBuilder, PermissionFlagsBits,
 } from "discord.js";
 import { getGuildConfig, saveGuildConfig, QuizQuestion } from "../config.js";
+import { VerificationModule } from "../modules/verification.js";
 
-// ─── /set-rules ───
-export function getRulesCommand() {
+// ─── /post-verify ───
+export function getPostVerifyCommand() {
   return new SlashCommandBuilder()
-    .setName("set-rules")
-    .setDescription("Set or update server rules (shown in welcome message)")
+    .setName("post-verify")
+    .setDescription("Post verification panel with rules + verify button in verification channel")
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator);
 }
 
-export async function handleRulesCommand(interaction: CommandInteraction, client: Client): Promise<void> {
+export async function handlePostVerifyCommand(interaction: CommandInteraction, client: Client): Promise<void> {
   const guildId = interaction.guild?.id || "";
   const config = getGuildConfig(guildId);
 
   const modal = new ModalBuilder()
-    .setCustomId(`set_rules:${guildId}`)
-    .setTitle("📜 Set Server Rules");
+    .setCustomId(`post_verify:${guildId}`)
+    .setTitle("📜 Post Verification Panel");
 
   const rulesInput = new ActionRowBuilder<TextInputBuilder>().addComponents(
     new TextInputBuilder()
@@ -152,7 +153,6 @@ export async function handleQuizRemoveCommand(interaction: CommandInteraction, c
   }
 
   const removed = config.quiz.questions.splice(idx, 1);
-  // Re-number remaining questions
   config.quiz.questions.forEach((q, i) => { q.id = i + 1; });
 
   saveGuildConfig(guildId, { quiz: { ...config.quiz, questions: config.quiz.questions } });
@@ -160,14 +160,14 @@ export async function handleQuizRemoveCommand(interaction: CommandInteraction, c
   await interaction.editReply({ content: `🗑️ Removed: **Q${removed[0].id}: ${removed[0].question}**\n${config.quiz.questions.length} question(s) remaining.` });
 }
 
-// ─── Handle modal submissions for set-rules and quiz-add ───
+// ─── Handle modal submissions ───
 export async function handleManagementModal(interaction: Interaction, client: Client): Promise<boolean> {
   if (!interaction.isModalSubmit()) return false;
 
   const customId = interaction.customId;
 
-  // ── Set Rules modal ──
-  if (customId.startsWith("set_rules:")) {
+  // ── Post Verify modal ──
+  if (customId.startsWith("post_verify:")) {
     const guildId = customId.split(":")[1];
     const rulesText = interaction.fields.getTextInputValue("rules_text").trim();
 
@@ -179,10 +179,12 @@ export async function handleManagementModal(interaction: Interaction, client: Cl
     const config = getGuildConfig(guildId);
     saveGuildConfig(guildId, { termsAndConditions: rulesText });
 
-    // Truncate for display
-    const preview = rulesText.length > 500 ? rulesText.slice(0, 500) + "..." : rulesText;
+    // Post the verification panel
+    const verificationModule = new VerificationModule(client);
+    const result = await verificationModule.postVerificationPanel(guildId);
+
     await interaction.reply({
-      content: `✅ **Rules updated!** Preview:\n\n${preview}`,
+      content: `✅ **Rules saved!** ${result}`,
       ephemeral: true,
     });
     return true;
@@ -216,8 +218,6 @@ export async function handleManagementModal(interaction: Interaction, client: Cl
     };
 
     config.quiz.questions.push(newQuestion);
-
-    // Re-number all questions
     config.quiz.questions.forEach((q, i) => { q.id = i + 1; });
 
     saveGuildConfig(guildId, { quiz: { ...config.quiz, questions: config.quiz.questions } });

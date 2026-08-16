@@ -11,13 +11,15 @@ import { getOAuth2Url, hasValidToken, truncate } from "../utils.js";
 /**
  * Module 3 — Verification + Authorization + Quiz Gate (Channel-Based, Multi-Server)
  *
- * Each guild has its own config. When a member joins:
- * 1. Bot assigns Unverified role (from that guild's config)
- * 2. Posts in verification channel with rules + Authorize + Verify buttons
- * 3. User authorizes bot (OAuth2 guilds.join scope) → stores token
- * 4. User takes quiz → pass → Verified role, fail → retry
+ * Admin uses /post-verify to post ONE shared verification message with rules + verify button.
+ * When a member joins:
+ * 1. Bot assigns Unverified role
+ * 2. Brief welcome message pointing to the verification channel
+ * 3. User clicks "Verify Me" on the shared message
+ * 4. If no token → gets their authorize link
+ * 5. Takes quiz → pass → Verified role, fail → retry
  *
- * All detailed logs (pass/fail with wrong answers, flagged users) go to logs channel.
+ * All detailed logs go to logs channel.
  */
 export class VerificationModule {
   private client: Client;
@@ -41,6 +43,37 @@ export class VerificationModule {
     }
   }
 
+  /** Post the shared verification panel (called by /post-verify command) */
+  async postVerificationPanel(guildId: string): Promise<string> {
+    const config = getGuildConfig(guildId);
+    if (!config.channels.verification) return "❌ No verification channel set. Run /setup first.";
+
+    const rules = config.termsAndConditions || "No rules set.";
+
+    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`verify_start:${guildId}`)
+        .setLabel("✅ Verify Me")
+        .setStyle(ButtonStyle.Success)
+    );
+
+    try {
+      const channel = await this.client.channels.fetch(config.channels.verification);
+      if (!channel || !channel.isTextBased()) return "❌ Verification channel not found.";
+
+      await (channel as TextChannel).send({
+        content:
+          `📜 **Server Rules:**\n${rules}\n\n───\n\n` +
+          `To get full access, click **✅ Verify Me** below.`,
+        components: [row],
+      });
+
+      return `✅ Verification panel posted in <#${config.channels.verification}>`;
+    } catch (err: any) {
+      return `❌ Failed to post: ${err.message}`;
+    }
+  }
+
   private setupListeners() {
     // ── On member join ──
     this.client.on(Events.GuildMemberAdd, async (member: GuildMember) => {
@@ -61,60 +94,34 @@ export class VerificationModule {
         .run(member.user.id, guildId);
 
       // Log to logs channel
-      await this.sendLog(guildId, `👤 **${member.user.username}** (${member.user.id}) joined — assigned Unverified role`);
+      await this.sendLog(guildId, `👤 **${member.user.username}** (<@${member.user.id}>) joined — assigned Unverified role`);
 
-      // Post verification message in verification channel
+      // Brief welcome — tell them to go verify
       try {
         const channel = await this.client.channels.fetch(config.channels.verification);
-        if (!channel || !channel.isTextBased()) return;
-
-        const authUrl = this.buildAuthUrl(member.user.id);
-
-        const row1 = new ActionRowBuilder<ButtonBuilder>().addComponents(
-          new ButtonBuilder()
-            .setURL(authUrl)
-            .setLabel("🔗 Authorize Bot")
-            .setStyle(ButtonStyle.Link)
-        );
-
-        const row2 = new ActionRowBuilder<TextInputBuilder>() as any;
-        const row2b = new ActionRowBuilder<ButtonBuilder>().addComponents(
-          new ButtonBuilder()
-            .setCustomId(`verify_start:${member.user.id}:${guildId}`)
-            .setLabel("✅ Verify Me")
-            .setStyle(ButtonStyle.Success)
-        );
-
-        const rules = config.termsAndConditions || "No rules set. Admin should use /set-rules.";
-
-        await (channel as TextChannel).send({
-          content: `👋 Welcome **${member.user.username}**!\n\n📜 **Server Rules:**\n${rules}\n\n───\n\nTo get full access:\n1️⃣ Click **🔗 Authorize Bot**\n2️⃣ Click **✅ Verify Me** — you'll get a quiz based on the rules above`,
-          components: [row1, row2b],
-        });
+        if (channel && channel.isTextBased()) {
+          await (channel as TextChannel).send(
+            `👋 Welcome <@${member.user.id}>! Please read the rules above and click **✅ Verify Me** to get full access.`
+          );
+        }
       } catch (err) {
-        console.error(`[${guildId}] Failed to post verification message for ${member.user.username}:`, err);
+        console.error(`[${guildId}] Failed to post welcome for ${member.user.username}:`, err);
       }
     });
 
-    // ── Handle "Verify Me" button ──
+    // ── Handle "Verify Me" button (shared — works for any user who clicks) ──
     this.client.on(Events.InteractionCreate, async (interaction: Interaction) => {
       if (!interaction.isButton()) return;
       if (!interaction.customId.startsWith("verify_start:")) return;
 
-      const parts = interaction.customId.split(":");
-      const targetUserId = parts[1];
-      const guildId = parts[2];
-
-      if (interaction.user.id !== targetUserId) {
-        await interaction.reply({ content: "❌ This verification is not for you!", ephemeral: true });
-        return;
-      }
+      const guildId = interaction.customId.split(":")[1];
+      const userId = interaction.user.id;
 
       const config = getGuildConfig(guildId);
       const db = getDb();
 
       const record = db.prepare("SELECT status, attempts FROM verifications WHERE user_id = ? AND guild_id = ?")
-        .get(targetUserId, guildId) as any;
+        .get(userId, guildId) as any;
 
       if (record?.status === "verified") {
         await interaction.reply({ content: "✅ You're already verified!", ephemeral: true });
@@ -126,21 +133,30 @@ export class VerificationModule {
         return;
       }
 
-      if (!hasValidToken(targetUserId)) {
-        await interaction.reply({
-          content: "🔒 You haven't authorized the bot yet!\n\n1. Click **🔗 Authorize Bot** above\n2. Then click **✅ Verify Me** again",
-          ephemeral: true,
-        });
+      // If no token, give them their authorize link
+      if (!hasValidToken(userId)) {
+        try {
+          const authUrl = getOAuth2Url(userId);
+          await interaction.reply({
+            content: `🔒 You need to authorize the bot first!\n\nClick here: **[🔗 Authorize Bot](${authUrl})**\n\nThen click **✅ Verify Me** again.`,
+            ephemeral: true,
+          });
+        } catch {
+          await interaction.reply({
+            content: "🔒 You need to authorize the bot first! Ask an admin for help.",
+            ephemeral: true,
+          });
+        }
         return;
       }
 
       if (!config.quiz.questions.length) {
-        await interaction.reply({ content: "❌ No quiz questions configured. Admin needs to run /setup.", ephemeral: true });
+        await interaction.reply({ content: "❌ No quiz questions configured. Admin needs to add questions with /quiz-add.", ephemeral: true });
         return;
       }
 
       db.prepare("UPDATE verifications SET agreed_to_rules_at = datetime('now'), quiz_started_at = datetime('now'), status = 'in_progress' WHERE user_id = ? AND guild_id = ?")
-        .run(targetUserId, guildId);
+        .run(userId, guildId);
 
       // Show all questions in one modal
       await this.sendQuizModal(interaction, guildId);
@@ -166,14 +182,6 @@ export class VerificationModule {
       await interaction.reply({ content: "✅ All answers submitted! Grading...", ephemeral: true });
       setTimeout(() => this.grade(userId, guildId, interaction, answers), 500);
     });
-  }
-
-  private buildAuthUrl(userId: string): string {
-    try {
-      return getOAuth2Url(userId);
-    } catch {
-      return "https://discord.com";
-    }
   }
 
   private async sendQuizModal(interaction: any, guildId: string) {
@@ -223,7 +231,6 @@ export class VerificationModule {
       ) {
         correct++;
       } else {
-        // Track what they got wrong
         const correctLetter = String.fromCharCode(65 + correctIdx);
         wrongQuestions.push(
           `❌ **Q${q.id}: ${q.question}**\n` +
@@ -250,7 +257,6 @@ export class VerificationModule {
         await member.roles.add(config.roles.verified);
         await member.roles.remove(config.roles.unverified);
 
-        // Detailed log to logs channel
         await this.sendLog(guildId,
           `✅ **${username}** (<@${userId}>) **PASSED verification!**\n` +
           `📊 Score: **${correct}/${total} (${pct}%)** — Attempt #${newAttempts}\n` +
@@ -262,7 +268,6 @@ export class VerificationModule {
         db.prepare("UPDATE verifications SET status = 'failed', attempts = ?, score = ?, answers_json = ? WHERE user_id = ? AND guild_id = ?")
           .run(newAttempts, pct, JSON.stringify(answers), userId, guildId);
 
-        // Detailed log to logs channel with wrong answers
         const wrongBlock = wrongQuestions.length > 0
           ? `\n\n**Wrong answers:**\n${wrongQuestions.join("\n\n")}`
           : "";
@@ -317,7 +322,6 @@ export class VerificationModule {
       await member.roles.remove(config.roles.unverified);
       getDb().prepare("UPDATE verifications SET status = 'verified', quiz_passed_at = datetime('now') WHERE user_id = ? AND guild_id = ?").run(userId, guildId);
 
-      // Log to logs channel
       await this.sendLog(guildId,
         `🛡️ **${member.user.username}** (<@${userId}>) manually verified by admin`
       );

@@ -12,7 +12,7 @@ import { RestoreModule } from "./modules/restore.js";
 import { MigrationModule } from "./modules/migration.js";
 import { getSetupCommands, handleSetupCommand, handleSetupInteraction } from "./commands/setup.js";
 import {
-  getRulesCommand, handleRulesCommand,
+  getPostVerifyCommand, handlePostVerifyCommand,
   getQuizAddCommand, handleQuizAddCommand,
   getQuizListCommand, handleQuizListCommand,
   getQuizRemoveCommand, handleQuizRemoveCommand,
@@ -65,7 +65,7 @@ const commands = [
   new SlashCommandBuilder().setName("verify-flagged").setDescription("View users flagged for review"),
 
   // Rules & Quiz management (admin)
-  getRulesCommand(),
+  getPostVerifyCommand(),
   getQuizAddCommand(),
   getQuizListCommand(),
   getQuizRemoveCommand(),
@@ -151,7 +151,7 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
   const guildId = interaction.guild?.id || "";
 
   // Don't deferReply for commands that show their own modal
-  if (commandName !== "setup" && commandName !== "set-rules" && commandName !== "quiz-add") {
+  if (commandName !== "setup" && commandName !== "post-verify" && commandName !== "quiz-add") {
     await interaction.deferReply({ ephemeral: true }).catch(() => {});
   }
 
@@ -210,8 +210,8 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
         break;
 
       // ── Rules & Quiz Management (admin) ──
-      case "set-rules":
-        await handleRulesCommand(interaction, client);
+      case "post-verify":
+        await handlePostVerifyCommand(interaction, client);
         break;
       case "quiz-add":
         await handleQuizAddCommand(interaction, client);
