@@ -1,3 +1,4 @@
+// @ts-nocheck — discord.js type quirks with bun
 import {
   Client, Events, GatewayIntentBits, Interaction, Partials,
   SlashCommandBuilder,
@@ -8,7 +9,21 @@ import { ChannelBackupModule } from "./modules/channel-backup.js";
 import { MemberTrackingModule } from "./modules/member-tracking.js";
 import { VerificationModule } from "./modules/verification.js";
 import { RestoreModule } from "./modules/restore.js";
+import { MigrationModule } from "./modules/migration.js";
 import { getSetupCommands, handleSetupCommand, handleSetupInteraction } from "./commands/setup.js";
+
+// ─── Start OAuth2 callback server (port 4000) ───
+// Only starts if OAuth2 is configured
+try {
+  const testConfig = loadConfig();
+  if (testConfig.oauth2.clientSecret && testConfig.oauth2.redirectUri) {
+    import("./oauth-callback.js");
+  } else {
+    console.log("⚠️ OAuth2 not configured — /oauth/callback won't work. Set OAUTH2_CLIENT_SECRET and OAUTH2_REDIRECT_URI in .env");
+  }
+} catch (e: any) {
+  console.log(`⚠️ OAuth2 callback server not started: ${e.message}`);
+}
 
 // ─── Load Config ───
 const config = loadConfig();
@@ -30,6 +45,7 @@ const channelBackup = new ChannelBackupModule(client);
 const memberTracking = new MemberTrackingModule(client);
 const verification = new VerificationModule(client);
 const restoreModule = new RestoreModule(client);
+const migrationModule = new MigrationModule(client);
 
 // ─── Slash Commands ───
 const setupCmds = getSetupCommands();
@@ -49,15 +65,18 @@ const commands = [
 
   // Module 2: Members
   new SlashCommandBuilder().setName("members-stats").setDescription("View member statistics"),
-  new SlashCommandBuilder().setName("migrate-invite").setDescription("DM all stored members an invite link")
-    .addStringOption((o) => o.setName("link").setDescription("Invite link").setRequired(true)),
-  new SlashCommandBuilder().setName("migrate-report").setDescription("View migration report"),
 
   // Module 3: Verification
   new SlashCommandBuilder().setName("verify-stats").setDescription("View verification stats"),
   new SlashCommandBuilder().setName("verify-manual").setDescription("Manually verify a user")
     .addUserOption((o) => o.setName("user").setDescription("User to verify").setRequired(true)),
   new SlashCommandBuilder().setName("verify-flagged").setDescription("View users flagged for review"),
+
+  // Module 5: Migration (OAuth2)
+  new SlashCommandBuilder().setName("migrate-add").setDescription("Add authorized users to a server directly")
+    .addStringOption((o) => o.setName("guild-id").setDescription("Target server ID").setRequired(true))
+    .addStringOption((o) => o.setName("role-id").setDescription("Role to assign on join (optional)")),
+  new SlashCommandBuilder().setName("migrate-status").setDescription("View OAuth2 authorization status"),
 
   // Module 4: Restore
   new SlashCommandBuilder().setName("restore-map").setDescription("Map old channel to new channel")
@@ -75,6 +94,17 @@ const commands = [
 // ─── Ready ───
 client.once(Events.ClientReady, async () => {
   console.log(`✅ Custodian is online as ${client.user?.tag}`);
+
+  // Save client ID to config if not set
+  if (client.user) {
+    const { saveConfig } = await import("./config.js");
+    const currentConfig = await import("./config.js").then(m => m.getConfig());
+    if (!currentConfig.clientId) {
+      saveConfig({ clientId: client.user.id });
+      console.log(`📝 Saved client ID: ${client.user.id}`);
+    }
+  }
+
   try {
     await client.application?.commands.set(commands as any);
     console.log(`📝 ${commands.length} slash commands registered`);
@@ -85,8 +115,8 @@ client.once(Events.ClientReady, async () => {
 
 // ─── Interaction Handler ───
 client.on(Events.InteractionCreate, async (interaction: Interaction) => {
-  // Handle setup wizard interactions (select menus, buttons)
-  if (interaction.isMessageComponent()) {
+  // Handle setup modal submissions
+  if (interaction.isModalSubmit()) {
     const handled = await handleSetupInteraction(interaction, client);
     if (handled) return;
   }
@@ -94,7 +124,7 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
   if (!interaction.isChatInputCommand()) return;
   const { commandName, options } = interaction;
 
-  // Don't deferReply for setup — it handles its own reply
+  // Don't deferReply for setup — it shows its own modal
   if (commandName !== "setup") {
     await interaction.deferReply({ ephemeral: true }).catch(() => {});
   }
@@ -138,17 +168,6 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
         await interaction.editReply(memberTracking.getStats());
         break;
 
-      case "migrate-invite": {
-        const link = options.getString("link", true);
-        await interaction.editReply("📬 Starting...");
-        const result = await memberTracking.migrateInvite(link);
-        await interaction.editReply(result);
-        break;
-      }
-      case "migrate-report":
-        await interaction.editReply(memberTracking.getReport());
-        break;
-
       // ── Module 3: Verification ──
       case "verify-stats":
         await interaction.editReply(verification.getStats());
@@ -162,6 +181,19 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
       }
       case "verify-flagged":
         await interaction.editReply(verification.getFlagged());
+        break;
+
+      // ── Module 5: Migration ──
+      case "migrate-add": {
+        const targetGuildId = options.getString("guild-id", true);
+        const roleId = options.getString("role-id") || undefined;
+        await interaction.editReply("🚀 Starting migration...");
+        const result = await migrationModule.migrateAdd(targetGuildId, roleId);
+        await interaction.editReply(result);
+        break;
+      }
+      case "migrate-status":
+        await interaction.editReply(migrationModule.getStatus());
         break;
 
       // ── Module 4: Restore ──
@@ -199,7 +231,9 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
     }
   } catch (err: any) {
     console.error("Command error:", err);
-    await interaction.editReply(`❌ Error: ${err.message}`);
+    try {
+      await interaction.editReply(`❌ Error: ${err.message}`);
+    } catch {}
   }
 });
 

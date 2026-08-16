@@ -1,38 +1,24 @@
 // @ts-nocheck — discord.js type quirks with bun
 import {
   ActionRowBuilder, ButtonBuilder, ButtonStyle,
-  ChannelType, Client, CommandInteraction, Interaction,
-  MessageComponentInteraction, StringSelectMenuBuilder,
-  StringSelectMenuOptionBuilder, EmbedBuilder,
+  Client, CommandInteraction, Interaction,
+  ModalBuilder, TextInputBuilder, TextInputStyle,
 } from "discord.js";
-import { getConfig, saveConfig, saveGuildId, BotConfig } from "../config.js";
+import { getConfig, saveConfig, saveGuildId } from "../config.js";
 
 /**
- * /setup — In-Discord setup wizard
- * Walks admin through configuration using Discord native dropdowns & buttons.
+ * /setup — One-shot setup via modal form(s).
+ * Admin types /setup → modal popup → fill in IDs → save. Done.
+ *
+ * Discord modals support max 5 text inputs per modal,
+ * so we use 2 modals: Modal 1 = roles + welcome, Modal 2 = channels + quiz.
  */
-interface SetupState {
-  step: "start" | "roles" | "channels" | "backup" | "quiz" | "done";
-  guildId: string;
-  roles: { unverified: string; verified: string; admin: string };
-  channels: { welcome: string; rules: string; verification: string };
-  backupChannels: string[];
-  quizQuestions: { id: number; question: string; type: string; options: string[]; correctAnswer: string }[];
-}
-
-const activeSetups = new Map<string, SetupState>();
-
-const MAX_SELECT_OPTIONS = 24; // Discord max is 25, leave 1 for "Done"
-
-function truncate(s: string, max: number): string {
-  return s.length > max ? s.slice(0, max - 1) + "…" : s;
-}
 
 export function getSetupCommands() {
   return [
     {
       name: "setup" as const,
-      description: "Start the Custodian setup wizard (admin only)",
+      description: "Configure Custodian (admin only)",
     },
   ];
 }
@@ -40,341 +26,289 @@ export function getSetupCommands() {
 export async function handleSetupCommand(interaction: CommandInteraction, client: Client): Promise<void> {
   const config = getConfig();
 
-  // Check if admin
-  if (config.guildId) {
-    try {
-      const member = await interaction.guild?.members.fetch(interaction.user.id);
-      if (member && config.roles.admin && !member.roles.cache.has(config.roles.admin)) {
-        await interaction.reply({ content: "❌ Only admins can run /setup", ephemeral: true });
-        return;
-      }
-    } catch {}
-  }
-
   // Find the guild
   const guilds = client.guilds.cache;
   if (!guilds.size) {
     await interaction.reply({ content: "❌ I'm not in any server! Invite me first.", ephemeral: true });
     return;
   }
-
   const guild = guilds.first()!;
-  const state: SetupState = {
-    step: "roles",
-    guildId: guild.id,
-    roles: { unverified: config.roles?.unverified || "", verified: config.roles?.verified || "", admin: config.roles?.admin || "" },
-    channels: { welcome: config.channels?.welcome || "", rules: config.channels?.rules || "", verification: config.channels?.verification || "" },
-    backupChannels: config.backupChannels || [],
-    quizQuestions: config.quiz?.questions?.length ? config.quiz.questions : [
-      { id: 1, question: "Is it okay to spam?", type: "yes_no", options: ["Yes", "No"], correctAnswer: "No" },
-      { id: 2, question: "Be respectful to everyone?", type: "yes_no", options: ["Yes", "No"], correctAnswer: "Yes" },
-      { id: 3, question: "NSFW allowed?", type: "yes_no", options: ["Yes", "No"], correctAnswer: "No" },
-    ],
-  };
 
-  activeSetups.set(interaction.user.id, state);
-  saveGuildId(guild.id);
-  state.guildId = guild.id;
-
-  try {
-    await interaction.reply({
-      content: `🔧 **Custodian Setup Wizard**\n\nServer: **${truncate(guild.name, 50)}** (${guild.memberCount} members)\n\n**Step 1/4: Select Roles**\nPick which role to configure:`,
-      ephemeral: true,
-      components: [buildRoleSelect(state)],
-    });
-  } catch (err: any) {
-    console.error("Setup error:", err);
-    try {
-      await interaction.reply({ content: `❌ Setup failed: ${err.message || err}`, ephemeral: true });
-    } catch {}
+  // Store client ID from the bot user
+  if (client.user && !config.clientId) {
+    saveConfig({ clientId: client.user.id });
   }
+
+  // Show first modal: Roles + Welcome Channel (5 fields max)
+  const modal = new ModalBuilder()
+    .setCustomId("setup_modal_1")
+    .setTitle("⚙️ Custodian Setup — Roles & Channels")
+    .addComponents(
+      // Field 1: Unverified Role ID
+      new ActionRowBuilder<TextInputBuilder>().addComponents(
+        new TextInputBuilder()
+          .setCustomId("role_unverified")
+          .setLabel("Unverified Role ID")
+          .setStyle(TextInputStyle.Short)
+          .setPlaceholder("e.g. 123456789012345678")
+          .setRequired(true)
+          .setMaxLength(25)
+          .setValue(config.roles.unverified || "")
+      ),
+      // Field 2: Verified Role ID
+      new ActionRowBuilder<TextInputBuilder>().addComponents(
+        new TextInputBuilder()
+          .setCustomId("role_verified")
+          .setLabel("Verified Role ID")
+          .setStyle(TextInputStyle.Short)
+          .setPlaceholder("e.g. 123456789012345678")
+          .setRequired(true)
+          .setMaxLength(25)
+          .setValue(config.roles.verified || "")
+      ),
+      // Field 3: Admin Role ID
+      new ActionRowBuilder<TextInputBuilder>().addComponents(
+        new TextInputBuilder()
+          .setCustomId("role_admin")
+          .setLabel("Admin Role ID")
+          .setStyle(TextInputStyle.Short)
+          .setPlaceholder("e.g. 123456789012345678")
+          .setRequired(true)
+          .setMaxLength(25)
+          .setValue(config.roles.admin || "")
+      ),
+      // Field 4: Welcome Channel ID
+      new ActionRowBuilder<TextInputBuilder>().addComponents(
+        new TextInputBuilder()
+          .setCustomId("channel_welcome")
+          .setLabel("Welcome Channel ID")
+          .setStyle(TextInputStyle.Short)
+          .setPlaceholder("e.g. 123456789012345678")
+          .setRequired(true)
+          .setMaxLength(25)
+          .setValue(config.channels.welcome || "")
+      ),
+      // Field 5: Rules Channel ID
+      new ActionRowBuilder<TextInputBuilder>().addComponents(
+        new TextInputBuilder()
+          .setCustomId("channel_rules")
+          .setLabel("Rules Channel ID")
+          .setStyle(TextInputStyle.Short)
+          .setPlaceholder("e.g. 123456789012345678")
+          .setRequired(true)
+          .setMaxLength(25)
+          .setValue(config.channels.rules || "")
+      ),
+    );
+
+  // Save guild ID
+  saveGuildId(guild.id);
+
+  await interaction.showModal(modal);
 }
 
 export async function handleSetupInteraction(interaction: Interaction, client: Client): Promise<boolean> {
-  if (!interaction.isMessageComponent()) return false;
-  if (!interaction.customId.startsWith("setup_")) return false;
+  // Handle Modal 1 submission (roles + welcome + rules)
+  if (interaction.isModalSubmit() && interaction.customId === "setup_modal_1") {
+    return await handleModal1(interaction, client) || true;
+  }
 
-  try {
-    const state = activeSetups.get(interaction.user.id);
-    if (!state) {
-      await interaction.reply({ content: "❌ No active setup. Run /setup again.", ephemeral: true });
-      return true;
-    }
-
-    const guild = client.guilds.cache.get(state.guildId)!;
-
-    if (interaction.customId === "setup_role_select" && interaction.isStringSelectMenu()) {
-      return await handleRoleSelect(interaction, state, guild) || true;
-    }
-
-    if (interaction.customId === "setup_channel_select" && interaction.isStringSelectMenu()) {
-      return await handleChannelSelect(interaction, state, guild) || true;
-    }
-
-    if (interaction.customId === "setup_backup_toggle" && interaction.isStringSelectMenu()) {
-      return await handleBackupToggle(interaction, state) || true;
-    }
-
-    if (interaction.customId === "setup_skip_backup" && interaction.isButton()) {
-      state.step = "quiz";
-      await interaction.update({ content: buildQuizStep(state), components: [buildQuizButtons()] });
-      return true;
-    }
-
-    if (interaction.customId === "setup_done_backup" && interaction.isButton()) {
-      state.step = "quiz";
-      await interaction.update({ content: buildQuizStep(state), components: [buildQuizButtons()] });
-      return true;
-    }
-
-    if (interaction.customId === "setup_skip_quiz" && interaction.isButton()) {
-      await saveAndFinish(interaction, state);
-      return true;
-    }
-
-    if (interaction.customId === "setup_done_quiz" && interaction.isButton()) {
-      await saveAndFinish(interaction, state);
-      return true;
-    }
-  } catch (err: any) {
-    console.error("Setup interaction error:", err);
-    try {
-      await interaction.reply({ content: `❌ Error: ${truncate(err.message || String(err), 200)}`, ephemeral: true });
-    } catch {}
-    return true;
+  // Handle Modal 2 submission (verification channel + quiz)
+  if (interaction.isModalSubmit() && interaction.customId === "setup_modal_2") {
+    return await handleModal2(interaction) || true;
   }
 
   return false;
 }
 
-// ─── Role Selection ───
-function buildRoleSelect(state: SetupState) {
-  return new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
-    new StringSelectMenuBuilder()
-      .setCustomId("setup_role_select")
-      .setPlaceholder("Select a role to assign...")
-      .addOptions([
-        new StringSelectMenuOptionBuilder()
-          .setLabel("Set UNVERIFIED role")
-          .setValue("label:unverified")
-          .setDescription(truncate(state.roles.unverified ? "✅ Set" : "Not set", 100))
-        ,
-        new StringSelectMenuOptionBuilder()
-          .setLabel("Set VERIFIED role")
-          .setValue("label:verified")
-          .setDescription(truncate(state.roles.verified ? "✅ Set" : "Not set", 100))
-        ,
-        new StringSelectMenuOptionBuilder()
-          .setLabel("Set ADMIN role")
-          .setValue("label:admin")
-          .setDescription(truncate(state.roles.admin ? "✅ Set" : "Not set", 100))
-        ,
-        new StringSelectMenuOptionBuilder()
-          .setLabel("Done -> Channels")
-          .setValue("done")
-          .setDescription("Continue to next step")
-        ,
-      ])
-  );
-}
+async function handleModal1(interaction: any, client: Client): Promise<boolean> {
+  const roleUnverified = interaction.fields.getTextInputValue("role_unverified").trim();
+  const roleVerified = interaction.fields.getTextInputValue("role_verified").trim();
+  const roleAdmin = interaction.fields.getTextInputValue("role_admin").trim();
+  const channelWelcome = interaction.fields.getTextInputValue("channel_welcome").trim();
+  const channelRules = interaction.fields.getTextInputValue("channel_rules").trim();
 
-function getRoleOptions(guild: any, roleType: string) {
-  const roles = guild.roles.cache.filter((r: any) => !r.managed && r.name !== "@everyone").sort((a: any, b: any) => b.position - a.position);
-  return [...roles.values()]
-    .slice(0, MAX_SELECT_OPTIONS)
-    .map((r: any) =>
-      new StringSelectMenuOptionBuilder()
-        .setLabel(truncate(r.name, 100))
-        .setValue(`${roleType}:${r.id}`)
-        .setDescription(truncate(`Position: ${r.position}`, 100))
-    );
-}
-
-async function handleRoleSelect(interaction: any, state: SetupState, guild: any) {
-  const value = interaction.values[0];
-
-  if (value.startsWith("label:")) {
-    const roleType = value.split(":")[1];
-    const options = getRoleOptions(guild, roleType);
-
-    if (!options.length) {
-      await interaction.reply({ content: `⚠️ No roles found. Create roles first in Server Settings.`, ephemeral: true });
-      return;
+  // Validate — basic check that they look like Discord IDs (numeric)
+  const idRegex = /^\d{17,20}$/;
+  for (const [name, val] of [
+    ["Unverified Role", roleUnverified],
+    ["Verified Role", roleVerified],
+    ["Admin Role", roleAdmin],
+    ["Welcome Channel", channelWelcome],
+    ["Rules Channel", channelRules],
+  ]) {
+    if (!idRegex.test(val)) {
+      await interaction.reply({
+        content: `❌ "${name}" doesn't look like a valid Discord ID. It should be a 17-20 digit number like \`123456789012345678\`.\n\nRun /setup again.`,
+        ephemeral: true,
+      });
+      return true;
     }
-
-    await interaction.reply({
-      content: `Select the **${roleType.toUpperCase()}** role:`,
-      ephemeral: true,
-      components: [
-        new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
-          new StringSelectMenuBuilder()
-            .setCustomId("setup_role_select")
-            .setPlaceholder(`Select ${roleType} role...`)
-            .addOptions(options)
-        ),
-      ],
-    });
-    return;
   }
 
-  if (value === "done") {
-    if (!state.roles.unverified || !state.roles.verified || !state.roles.admin) {
-      await interaction.reply({ content: "⚠️ Please set all 3 roles before continuing.", ephemeral: true });
-      return;
-    }
-    state.step = "channels";
-    const unv = guild.roles.cache.get(state.roles.unverified)?.name || "?";
-    const ver = guild.roles.cache.get(state.roles.verified)?.name || "?";
-    const adm = guild.roles.cache.get(state.roles.admin)?.name || "?";
-    await interaction.update({
-      content: `**Step 2/4: Select Channels**\n\n🔴 Unverified: ${unv}\n🟢 Verified: ${ver}\n🛡️ Admin: ${adm}\n\nPick which channel to configure:`,
-      components: [buildChannelSelect(state)],
-    });
-    return;
-  }
-
-  const [roleType, roleId] = value.split(":");
-  (state.roles as any)[roleType] = roleId;
-  const roleName = guild.roles.cache.get(roleId)?.name || roleId;
-  await interaction.update({
-    content: `🔧 **Step 1/4: Select Roles**\n\n🔴 Unverified: ${guild.roles.cache.get(state.roles.unverified)?.name || "❌ not set"}\n🟢 Verified: ${guild.roles.cache.get(state.roles.verified)?.name || "❌ not set"}\n🛡️ Admin: ${guild.roles.cache.get(state.roles.admin)?.name || "❌ not set"}`,
-    components: [buildRoleSelect(state)],
+  // Temporarily save modal 1 values — we'll store them in a map and show modal 2
+  // Use a simple map keyed by user+guild for safety
+  const key = `${interaction.user.id}`;
+  if (!(globalThis as any).__setupTemp) (globalThis as any).__setupTemp = new Map();
+  (globalThis as any).__setupTemp.set(key, {
+    roles: { unverified: roleUnverified, verified: roleVerified, admin: roleAdmin },
+    channels: { welcome: channelWelcome, rules: channelRules },
   });
-}
 
-// ─── Channel Selection ───
-function buildChannelSelect(state: SetupState) {
-  return new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
-    new StringSelectMenuBuilder()
-      .setCustomId("setup_channel_select")
-      .setPlaceholder("Assign a channel...")
-      .addOptions([
-        new StringSelectMenuOptionBuilder()
-          .setLabel("Set WELCOME channel")
-          .setValue("label:welcome")
-          .setDescription(state.channels.welcome ? "✅ Set" : "Not set")
-        ,
-        new StringSelectMenuOptionBuilder()
-          .setLabel("Set RULES channel")
-          .setValue("label:rules")
-          .setDescription(state.channels.rules ? "✅ Set" : "Not set")
-        ,
-        new StringSelectMenuOptionBuilder()
-          .setLabel("Set VERIFICATION channel")
-          .setValue("label:verification")
-          .setDescription(state.channels.verification ? "✅ Set" : "Not set")
-        ,
-        new StringSelectMenuOptionBuilder()
-          .setLabel("Done -> Backup")
-          .setValue("done")
-          .setDescription("Continue to next step")
-        ,
-      ])
-  );
-}
+  const config = getConfig();
 
-function getChannelOptions(guild: any, chType: string) {
-  const channels = guild.channels.cache
-    .filter((c: any) => c.type === ChannelType.GuildText)
-    .sorted((a: any, b: any) => a.position - b.position);
-  return [...channels.values()]
-    .slice(0, MAX_SELECT_OPTIONS)
-    .map((c: any) =>
-      new StringSelectMenuOptionBuilder()
-        .setLabel(truncate(`#${c.name}`, 100))
-        .setValue(`${chType}:${c.id}`)
+  // Show Modal 2: Verification Channel + Quiz Settings (5 fields)
+  const modal2 = new ModalBuilder()
+    .setCustomId("setup_modal_2")
+    .setTitle("⚙️ Setup — Verification & Quiz")
+    .addComponents(
+      new ActionRowBuilder<TextInputBuilder>().addComponents(
+        new TextInputBuilder()
+          .setCustomId("channel_verification")
+          .setLabel("Verification Channel ID")
+          .setStyle(TextInputStyle.Short)
+          .setPlaceholder("e.g. 123456789012345678")
+          .setRequired(true)
+          .setMaxLength(25)
+          .setValue(config.channels.verification || "")
+      ),
+      new ActionRowBuilder<TextInputBuilder>().addComponents(
+        new TextInputBuilder()
+          .setCustomId("quiz_pass_percentage")
+          .setLabel("Quiz Pass Percentage (e.g. 80)")
+          .setStyle(TextInputStyle.Short)
+          .setPlaceholder("80")
+          .setRequired(true)
+          .setMaxLength(3)
+          .setValue(String(config.quiz.passPercentage))
+      ),
+      new ActionRowBuilder<TextInputBuilder>().addComponents(
+        new TextInputBuilder()
+          .setCustomId("quiz_max_attempts")
+          .setLabel("Max Quiz Attempts (e.g. 3)")
+          .setStyle(TextInputStyle.Short)
+          .setPlaceholder("3")
+          .setRequired(true)
+          .setMaxLength(2)
+          .setValue(String(config.quiz.maxAttempts))
+      ),
+      new ActionRowBuilder<TextInputBuilder>().addComponents(
+        new TextInputBuilder()
+          .setCustomId("oauth2_client_secret")
+          .setLabel("OAuth2 Client Secret (from Dev Portal)")
+          .setStyle(TextInputStyle.Short)
+          .setPlaceholder("Leave empty to keep current")
+          .setRequired(false)
+          .setMaxLength(60)
+          .setValue(config.oauth2.clientSecret || "")
+      ),
+      new ActionRowBuilder<TextInputBuilder>().addComponents(
+        new TextInputBuilder()
+          .setCustomId("oauth2_redirect_uri")
+          .setLabel("OAuth2 Redirect URI")
+          .setStyle(TextInputStyle.Short)
+          .setPlaceholder("https://your-domain.com/oauth/callback")
+          .setRequired(false)
+          .setMaxLength(200)
+          .setValue(config.oauth2.redirectUri || "")
+      ),
     );
+
+  await interaction.showModal(modal2);
+  return true;
 }
 
-async function handleChannelSelect(interaction: any, state: SetupState, guild: any) {
-  const value = interaction.values[0];
+async function handleModal2(interaction: any): Promise<boolean> {
+  const channelVerification = interaction.fields.getTextInputValue("channel_verification").trim();
+  const quizPassPct = parseInt(interaction.fields.getTextInputValue("quiz_pass_percentage").trim(), 10);
+  const quizMaxAttempts = parseInt(interaction.fields.getTextInputValue("quiz_max_attempts").trim(), 10);
+  const oauth2Secret = interaction.fields.getTextInputValue("oauth2_client_secret").trim();
+  const oauth2Redirect = interaction.fields.getTextInputValue("oauth2_redirect_uri").trim();
 
-  if (value.startsWith("label:")) {
-    const chType = value.split(":")[1];
-    const options = getChannelOptions(guild, chType);
-
-    if (!options.length) {
-      await interaction.reply({ content: "⚠️ No text channels found.", ephemeral: true });
-      return;
-    }
-
+  // Validate verification channel ID
+  const idRegex = /^\d{17,20}$/;
+  if (!idRegex.test(channelVerification)) {
     await interaction.reply({
-      content: `Select the **${chType.toUpperCase()}** channel:`,
+      content: `❌ "Verification Channel ID" doesn't look like a valid Discord ID. Run /setup again.`,
       ephemeral: true,
-      components: [
-        new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
-          new StringSelectMenuBuilder()
-            .setCustomId("setup_channel_select")
-            .setPlaceholder(`Select ${chType} channel...`)
-            .addOptions(options)
-        ),
-      ],
     });
-    return;
+    return true;
   }
 
-  if (value === "done") {
-    if (!state.channels.welcome || !state.channels.rules || !state.channels.verification) {
-      await interaction.reply({ content: "⚠️ Please set all 3 channels before continuing.", ephemeral: true });
-      return;
-    }
-    state.step = "backup";
-    await interaction.update({
-      content: `**Step 3/4: Backup Channels (optional)**\n\nWelcome: <#${state.channels.welcome}>\nRules: <#${state.channels.rules}>\nVerification: <#${state.channels.verification}>\n\nThis step is optional. Skip if you don't need channel backups.`,
-      components: [buildBackupSelect()],
-    });
-    return;
+  // Validate quiz settings
+  if (isNaN(quizPassPct) || quizPassPct < 1 || quizPassPct > 100) {
+    await interaction.reply({ content: "❌ Pass percentage must be 1-100. Run /setup again.", ephemeral: true });
+    return true;
+  }
+  if (isNaN(quizMaxAttempts) || quizMaxAttempts < 1 || quizMaxAttempts > 10) {
+    await interaction.reply({ content: "❌ Max attempts must be 1-10. Run /setup again.", ephemeral: true });
+    return true;
   }
 
-  const [chType, chId] = value.split(":");
-  (state.channels as any)[chType] = chId;
-  await interaction.update({
-    content: `**Step 2/4: Select Channels**\n\n👋 Welcome: ${state.channels.welcome ? `<#${state.channels.welcome}>` : "❌ not set"}\n📜 Rules: ${state.channels.rules ? `<#${state.channels.rules}>` : "❌ not set"}\n✅ Verification: ${state.channels.verification ? `<#${state.channels.verification}>` : "❌ not set"}`,
-    components: [buildChannelSelect(state)],
-  });
-}
+  // Retrieve modal 1 temp data
+  const key = `${interaction.user.id}`;
+  const temp = (globalThis as any).__setupTemp?.get(key);
+  if (!temp) {
+    await interaction.reply({ content: "❌ Setup session expired. Run /setup again.", ephemeral: true });
+    return true;
+  }
 
-// ─── Backup Channel Selection ───
-function buildBackupSelect() {
-  return new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder().setCustomId("setup_done_backup").setLabel("✅ Done").setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId("setup_skip_backup").setLabel("⏭️ Skip").setStyle(ButtonStyle.Secondary),
-  );
-}
+  // Merge and save everything
+  const config = getConfig();
+  const defaultQuiz = [
+    { id: 1, question: "Is it okay to spam?", type: "yes_no", options: ["Yes", "No"], correctAnswer: "No" },
+    { id: 2, question: "Be respectful to everyone?", type: "yes_no", options: ["Yes", "No"], correctAnswer: "Yes" },
+    { id: 3, question: "NSFW allowed?", type: "yes_no", options: ["Yes", "No"], correctAnswer: "No" },
+  ];
 
-async function handleBackupToggle(interaction: any, state: SetupState) {
-  // Backup toggle not using dropdown anymore — just skip/done buttons
-  await interaction.reply({ content: "Use the Done or Skip buttons below.", ephemeral: true });
-}
-
-// ─── Quiz Step ───
-function buildQuizStep(state: SetupState): string {
-  const qList = state.quizQuestions.slice(0, 10).map((q, i) => `**${i + 1}.** ${q.question} → ✅ ${q.correctAnswer}`).join("\n");
-  return `**Step 4/4: Quiz Questions** (${state.quizQuestions.length})\n\n${qList}\n\n_You can edit these later in config/bot.config.json_`;
-}
-
-function buildQuizButtons() {
-  return new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder().setCustomId("setup_done_quiz").setLabel("✅ Save & Finish").setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId("setup_skip_quiz").setLabel("Use defaults & finish").setStyle(ButtonStyle.Secondary),
-  );
-}
-
-// ─── Save & Finish ───
-async function saveAndFinish(interaction: MessageComponentInteraction, state: SetupState) {
   saveConfig({
-    guildId: state.guildId,
-    roles: state.roles,
-    channels: state.channels,
-    backupChannels: state.backupChannels,
-    quiz: { maxAttempts: 3, passPercentage: 80, questions: state.quizQuestions },
+    guildId: config.guildId,
+    roles: temp.roles,
+    channels: {
+      ...temp.channels,
+      verification: channelVerification,
+    },
+    quiz: {
+      maxAttempts: quizMaxAttempts,
+      passPercentage: quizPassPct,
+      questions: config.quiz?.questions?.length ? config.quiz.questions : defaultQuiz,
+    },
     termsAndConditions: "## Server Rules\n\n1. Be respectful to all members.\n2. No spam, self-promotion, or unsolicited DMs.\n3. No NSFW or offensive content.\n4. Follow Discord's Terms of Service.\n5. Listen to staff — their decisions are final.\n6. Use channels for their intended purpose.\n\n**Breaking these rules may result in warnings, kicks, or bans.**",
   });
 
-  activeSetups.delete(interaction.user.id);
+  // Save OAuth2 settings separately (only update if provided)
+  if (oauth2Secret || oauth2Redirect) {
+    saveConfig({
+      oauth2: {
+        clientSecret: oauth2Secret || config.oauth2.clientSecret,
+        redirectUri: oauth2Redirect || config.oauth2.redirectUri,
+      },
+    });
+  }
 
-  await interaction.update({
-    content: `🎉 **Custodian Setup Complete!**\n\n**Roles:**\n🔴 Unverified: <@&${state.roles.unverified}>\n🟢 Verified: <@&${state.roles.verified}>\n🛡️ Admin: <@&${state.roles.admin}>\n\n**Channels:**\n👋 Welcome: <#${state.channels.welcome}>\n📜 Rules: <#${state.channels.rules}>\n✅ Verification: <#${state.channels.verification}>\n📦 Backup: ${state.backupChannels.length} channel(s)\n📝 Quiz: ${state.quizQuestions.length} questions\n\n_Saved to config/bot.config.json_`,
-    components: [],
+  // Clean up temp data
+  (globalThis as any).__setupTemp?.delete(key);
+
+  const unvRole = client.guilds.cache.get(config.guildId)?.roles.cache.get(temp.roles.unverified);
+  const verRole = client.guilds.cache.get(config.guildId)?.roles.cache.get(temp.roles.verified);
+  const admRole = client.guilds.cache.get(config.guildId)?.roles.cache.get(temp.roles.admin);
+
+  await interaction.reply({
+    content: `🎉 **Custodian Setup Complete!**\n\n` +
+      `**Roles:**\n` +
+      `🔴 Unverified: ${unvRole ? `<@&${temp.roles.unverified}>` : temp.roles.unverified}\n` +
+      `🟢 Verified: ${verRole ? `<@&${temp.roles.verified}>` : temp.roles.verified}\n` +
+      `🛡️ Admin: ${admRole ? `<@&${temp.roles.admin}>` : temp.roles.admin}\n\n` +
+      `**Channels:**\n` +
+      `👋 Welcome: <#${temp.channels.welcome}>\n` +
+      `📜 Rules: <#${temp.channels.rules}>\n` +
+      `✅ Verification: <#${channelVerification}>\n\n` +
+      `**Quiz:** ${config.quiz.questions.length} questions, ${quizPassPct}% pass, ${quizMaxAttempts} attempts\n` +
+      `**OAuth2:** ${oauth2Secret ? "✅ configured" : "⚠️ not set — bot authorization won't work"}` +
+      (oauth2Secret && !oauth2Redirect ? `\n⚠️ OAuth2 redirect URI not set — bot authorization won't work` : "") +
+      `\n\n_Saved to config/bot.config.json_`,
+    ephemeral: true,
   });
+
+  return true;
 }

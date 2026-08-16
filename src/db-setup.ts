@@ -61,17 +61,6 @@ db.exec(`
     is_active INTEGER DEFAULT 1,
     created_at TEXT DEFAULT (datetime('now'))
   );
-
-  CREATE TABLE IF NOT EXISTS migration_invites (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id TEXT NOT NULL,
-    invite_link TEXT NOT NULL,
-    status TEXT DEFAULT 'pending',
-    sent_at TEXT,
-    failed_reason TEXT DEFAULT '',
-    joined_at TEXT,
-    created_at TEXT DEFAULT (datetime('now'))
-  );
 `);
 
 // ─── Module 3: Verification ───
@@ -110,6 +99,18 @@ db.exec(`
     target_channel_id TEXT NOT NULL,
     is_forum INTEGER DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now'))
+  );
+`);
+
+// ─── Module 5: OAuth2 Tokens ───
+db.exec(`
+  CREATE TABLE IF NOT EXISTS oauth_tokens (
+    user_id TEXT PRIMARY KEY,
+    access_token TEXT NOT NULL,
+    refresh_token TEXT DEFAULT '',
+    expires_at TEXT NOT NULL,
+    scope TEXT DEFAULT '',
+    authorized_at TEXT DEFAULT (datetime('now'))
   );
 `);
 

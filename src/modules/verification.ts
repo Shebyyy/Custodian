@@ -1,16 +1,25 @@
+// @ts-nocheck — discord.js type quirks with bun
 import {
   ActionRowBuilder, ButtonBuilder, ButtonStyle, Client, Events,
-  GuildMember, Interaction, ModalBuilder,
-  TextInputBuilder, TextInputStyle, TextChannel,
+  GuildMember, Interaction, LinkButtonBuilder,
+  ModalBuilder, TextInputBuilder, TextInputStyle, TextChannel,
 } from "discord.js";
 import { getDb } from "../db.js";
 import { getConfig, QuizQuestion } from "../config.js";
+import { getOAuth2Url, hasValidToken, truncate } from "../utils.js";
 
 /**
- * Module 3 — Verification + Quiz Gate (Channel-Based)
- * New member joins → gets Unverified role → bot posts in #verification channel
- * → user clicks "Verify Me" button → modal with quiz pops up → grade → Verified role
- * NO DMs needed — everything happens in the verification channel.
+ * Module 3 — Verification + Authorization + Quiz Gate (Channel-Based)
+ *
+ * Flow:
+ * 1. User joins → Unverified role assigned → bot posts in #verification
+ * 2. Message has 2 buttons:
+ *    - 🔗 Authorize Bot (Link button → opens Discord OAuth2 page)
+ *    - ✅ Verify Me (Regular button → starts quiz, only if authorized)
+ * 3. User clicks Authorize → browser → Discord auth → callback → token stored
+ * 4. User clicks Verify Me → check authorized → quiz modals → grade → Verified role
+ *
+ * NO DMs. Everything in the verification channel.
  */
 export class VerificationModule {
   private client: Client;
@@ -22,7 +31,7 @@ export class VerificationModule {
   }
 
   private setupListeners() {
-    // ── On member join: assign Unverified role + post verification message in channel ──
+    // ── On member join: assign Unverified role + post verification message ──
     this.client.on(Events.GuildMemberAdd, async (member: GuildMember) => {
       const config = getConfig();
       if (!config.roles.unverified || !config.roles.verified || !config.channels.verification) return;
@@ -37,25 +46,46 @@ export class VerificationModule {
       // Record in DB
       getDb().prepare("INSERT OR IGNORE INTO verifications (user_id, status) VALUES (?, 'pending')").run(member.user.id);
 
-      // Post verification prompt in the channel (not DM!)
+      // Check if already authorized & verified from a previous server
+      const isAuthorized = hasValidToken(member.user.id);
+      const prevRecord = getDb().prepare("SELECT status FROM verifications WHERE user_id = ?").get(member.user.id) as any;
+
+      // Post verification prompt in the channel
       try {
         const channel = await this.client.channels.fetch(config.channels.verification);
         if (!channel || !channel.isTextBased()) return;
 
-        const rulesPreview = config.termsAndConditions.length > 300
-          ? config.termsAndConditions.slice(0, 300) + "\n\n... *(read full rules in #rules)*"
-          : config.termsAndConditions;
+        const authUrl = this.buildAuthUrl(member.user.id);
 
         const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-          new ButtonBuilder()
-            .setCustomId(`verify_start:${member.user.id}`)
-            .setLabel("✅ Verify Me")
-            .setStyle(ButtonStyle.Success)
+          new LinkButtonBuilder()
+            .setURL(authUrl)
+            .setLabel("🔗 Authorize Bot")
+            .setStyle(ButtonStyle.Link)
+            .setEmoji("🔗"),
         );
 
+        const row2 = new ActionRowBuilder<ButtonBuilder>().addComponents(
+          new ButtonBuilder()
+            .setCustomId(`verify_start:${member.user.id}`)
+            .setLabel(isAuthorized ? "✅ Verify Me" : "🔒 Verify Me (Authorize First)")
+            .setStyle(isAuthorized ? ButtonStyle.Success : ButtonStyle.Secondary)
+            .setDisabled(!isAuthorized),
+        );
+
+        let statusNote = "";
+        if (prevRecord?.status === "verified") {
+          statusNote = "\n\n✅ *You were previously verified — but you still need to verify here.*";
+        } else if (isAuthorized) {
+          statusNote = "\n\n✅ *Bot authorized! Click **Verify Me** to take the quiz.*";
+        } else {
+          statusNote = "\n\n🔗 *Click **Authorize Bot** first, then **Verify Me** will unlock.*";
+        }
+
         await (channel as TextChannel).send({
-          content: `👋 Welcome **${member.user.username}**!\n\n---\n${rulesPreview}\n---\n\nClick the button below to start a quick quiz and gain full access.`,
-          components: [row],
+          content: `👋 Welcome **${member.user.username}**!\n\n` +
+            `Please complete these steps to get full access:${statusNote}`,
+          components: [row, row2],
         });
       } catch (err) {
         console.error(`Failed to post verification message for ${member.user.username}:`, err);
@@ -69,7 +99,7 @@ export class VerificationModule {
 
       const targetUserId = interaction.customId.split(":")[1];
 
-      // Only the mentioned user (or admin) can click
+      // Only the mentioned user can click (or admin)
       if (interaction.user.id !== targetUserId) {
         await interaction.reply({ content: "❌ This verification is not for you!", ephemeral: true });
         return;
@@ -91,11 +121,28 @@ export class VerificationModule {
         return;
       }
 
+      // Check if authorized
+      if (!hasValidToken(targetUserId)) {
+        await interaction.reply({
+          content: "🔒 Please click **🔗 Authorize Bot** first! The bot needs your authorization to be able to add you to servers in the future.\n\nAfter authorizing, the Verify Me button will unlock.",
+          ephemeral: true,
+        });
+        return;
+      }
+
+      // Check if quiz questions exist
+      if (!config.quiz.questions.length) {
+        await interaction.reply({ content: "❌ No quiz questions configured. Admin needs to set up the bot first.", ephemeral: true });
+        return;
+      }
+
       await interaction.reply({ content: "📝 Starting quiz...", ephemeral: true });
       db.prepare("UPDATE verifications SET agreed_to_rules_at = datetime('now'), quiz_started_at = datetime('now'), status = 'in_progress' WHERE user_id = ?").run(targetUserId);
 
       this.quizInProgress.set(targetUserId, { questionIndex: 0, answers: {}, channelId: interaction.channelId });
-      this.sendQuizModal(interaction, 0);
+
+      // Small delay then show first modal
+      setTimeout(() => this.sendQuizModal(interaction, 0), 500);
     });
 
     // ── Handle quiz modal submissions ──
@@ -122,13 +169,20 @@ export class VerificationModule {
       if (next < config.quiz.questions.length) {
         state.questionIndex = next;
         await interaction.reply({ content: `✅ Answer recorded. Next question...`, ephemeral: true });
-        // Small delay before showing next modal
         setTimeout(() => this.sendQuizModal(interaction, next), 500);
       } else {
         await interaction.reply({ content: "✅ All answers submitted! Grading...", ephemeral: true });
         setTimeout(() => this.grade(userId, interaction, state.answers, state.channelId), 500);
       }
     });
+  }
+
+  private buildAuthUrl(userId: string): string {
+    try {
+      return getOAuth2Url(userId);
+    } catch {
+      return "https://discord.com";
+    }
   }
 
   private async sendQuizModal(interaction: any, idx: number) {
@@ -258,8 +312,4 @@ export class VerificationModule {
     if (!users.length) return "📋 No flagged users";
     return "⚠️ **Flagged for review:**\n" + users.map((u) => `• <@${u.user_id}> — ${u.attempts} attempts, ${u.score}%`).join("\n");
   }
-}
-
-function truncate(s: string, max: number): string {
-  return s.length > max ? s.slice(0, max - 1) + "…" : s;
 }

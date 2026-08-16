@@ -23,6 +23,11 @@ function loadEnv(): Record<string, string> {
 // ─── Types ───
 export interface BotConfig {
   token: string;
+  clientId: string;
+  oauth2: {
+    clientSecret: string;
+    redirectUri: string;
+  };
   guildId: string;
   roles: { unverified: string; verified: string; admin: string };
   channels: { welcome: string; rules: string; verification: string };
@@ -67,6 +72,11 @@ export function loadConfig(): BotConfig {
 
   _config = {
     token: env.DISCORD_BOT_TOKEN,
+    clientId: json.clientId || "",
+    oauth2: {
+      clientSecret: env.OAUTH2_CLIENT_SECRET || json.oauth2?.clientSecret || "",
+      redirectUri: env.OAUTH2_REDIRECT_URI || json.oauth2?.redirectUri || "",
+    },
     guildId: env.GUILD_ID || json.guildId || "",
     roles: json.roles || { unverified: "", verified: "", admin: "" },
     channels: json.channels || { welcome: "", rules: "", verification: "" },
@@ -112,7 +122,7 @@ export function loadChannelMappings(): ChannelMapping[] {
   if (!existsSync(MAPPINGS_PATH)) return [];
   const data = JSON.parse(readFileSync(MAPPINGS_PATH, "utf-8"));
   const mappings: ChannelMapping[] = [];
- if (data.mappings) {
+  if (data.mappings) {
     for (const [source, target] of Object.entries(data.mappings)) {
       mappings.push({ sourceChannelId: source, targetChannelId: target as string, isForum: false });
     }

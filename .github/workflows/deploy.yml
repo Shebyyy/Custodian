@@ -19,7 +19,7 @@ jobs:
           script_stop: false
           script: |
             set -e
-            echo "=== Deploying Custodian (main) ==="
+            echo "=== Deploying Custodian ==="
 
             # Install bun if missing
             echo "[1/6] Checking bun..."
@@ -55,6 +55,13 @@ jobs:
             printf 'DISCORD_BOT_TOKEN=%s\n' \
               '${{ secrets.DISCORD_BOT_TOKEN }}' \
               > /root/Custodian/.env
+            # Only add OAuth2 secrets if they exist
+            if [ -n '${{ secrets.OAUTH2_CLIENT_SECRET }}' ]; then
+              printf 'OAUTH2_CLIENT_SECRET=%s\n' '${{ secrets.OAUTH2_CLIENT_SECRET }}' >> /root/Custodian/.env
+            fi
+            if [ -n '${{ secrets.OAUTH2_REDIRECT_URI }}' ]; then
+              printf 'OAUTH2_REDIRECT_URI=%s\n' '${{ secrets.OAUTH2_REDIRECT_URI }}' >> /root/Custodian/.env
+            fi
             chmod 600 /root/Custodian/.env
             echo "OK: .env written"
 
@@ -65,13 +72,18 @@ jobs:
             bun run db:setup
             echo "OK: database ready"
 
-            # Kill old bot processes — ONLY matches processes named "bun", NOT the bash SSH script
+            # Kill old bot using PID file (safe — won't match script itself)
             echo "[6/6] Restarting bot..."
-            pgrep -x bun | while read pid; do
-              if cat /proc/$pid/cmdline 2>/dev/null | tr '\0' ' ' | grep -q "index.ts"; then
-                kill -9 $pid 2>/dev/null || true
+            if [ -f /root/Custodian/data/bot.pid ]; then
+              OLD_PID=$(cat /root/Custodian/data/bot.pid)
+              if kill -0 "$OLD_PID" 2>/dev/null; then
+                kill -9 "$OLD_PID" 2>/dev/null || true
+                echo "Stopped old process (PID: $OLD_PID)"
               fi
-            done
+              rm -f /root/Custodian/data/bot.pid
+            else
+              echo "No PID file found — skipping kill"
+            fi
             sleep 2
 
             # Start
