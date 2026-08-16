@@ -1,6 +1,6 @@
 // @ts-nocheck — discord.js type quirks with bun
 import {
-  ActionRowBuilder, ButtonBuilder, ButtonStyle, Client, Events,
+  ActionRowBuilder, ButtonBuilder, ButtonStyle, Client, Colors, EmbedBuilder, Events,
   GuildMember, Interaction,
   ModalBuilder, TextInputBuilder, TextInputStyle, TextChannel,
 } from "discord.js";
@@ -16,7 +16,7 @@ import { getOAuth2Url, hasValidToken, truncate } from "../utils.js";
  *
  * Flow:
  * 1. Admin posts rules, runs /post-verify
- * 2. Member joins → Unverified role assigned + logged
+ * 2. Member joins → Unverified role assigned + logged (embed)
  * 3. User clicks Verify Me → quiz modal (5 questions)
  * 4. Pass (5/5) → Verified role, Fail → retry
  */
@@ -46,13 +46,13 @@ export class VerificationModule {
     this.setupListeners();
   }
 
-  private async sendLog(guildId: string, content: string): Promise<void> {
+  private async sendLog(guildId: string, embed: EmbedBuilder): Promise<void> {
     try {
       const config = getGuildConfig(guildId);
       if (!config.channels.logs) return;
       const channel = await this.client.channels.fetch(config.channels.logs);
       if (channel && channel.isTextBased()) {
-        await (channel as TextChannel).send(content);
+        await (channel as TextChannel).send({ embeds: [embed] });
       }
     } catch (err) {
       console.error(`[${guildId}] Failed to send log:`, err);
@@ -96,9 +96,30 @@ export class VerificationModule {
       `).run(member.user.id, guildId);
 
       if (wasReturning) {
-        await this.sendLog(guildId, `🔄 **${member.user.username}** (<@${member.user.id}>) rejoined — verification reset to Unverified`);
+        await this.sendLog(guildId,
+          new EmbedBuilder()
+            .setColor(Colors.Fuchsia)
+            .setTitle("Member Rejoined")
+            .setDescription(`**${member.user.username}** (<@${member.user.id}>)`)
+            .addFields(
+              { name: "Action", value: "Verification reset to Unverified", inline: true },
+              { name: "Roles", value: `Removed <@&${config.roles.verified}>, Added <@&${config.roles.unverified}>`, inline: true },
+            )
+            .setTimestamp()
+        );
       } else {
-        await this.sendLog(guildId, `👤 **${member.user.username}** (<@${member.user.id}>) joined — assigned Unverified role`);
+        await this.sendLog(guildId,
+          new EmbedBuilder()
+            .setColor(Colors.Blurple)
+            .setTitle("Member Joined")
+            .setDescription(`**${member.user.username}** (<@${member.user.id}>)`)
+            .addFields(
+              { name: "Role Assigned", value: `<@&${config.roles.unverified}>`, inline: true },
+              { name: "Status", value: "Awaiting verification", inline: true },
+            )
+            .setThumbnail(member.user.displayAvatarURL({ size: 64 }))
+            .setTimestamp()
+        );
       }
     });
 
@@ -108,7 +129,13 @@ export class VerificationModule {
       const config = getGuildConfig(guildId);
       if (!config.isSetup) return;
 
-      await this.sendLog(guildId, `🚪 **${member.user.username}** (<@${member.user.id}>) left the server`);
+      await this.sendLog(guildId,
+        new EmbedBuilder()
+          .setColor(Colors.DarkGrey)
+          .setTitle("Member Left")
+          .setDescription(`**${member.user.username}** (<@${member.user.id}>)`)
+          .setTimestamp()
+      );
     });
 
     // ── Handle "Verify Me" button (shared — anyone can click) ──
@@ -126,12 +153,12 @@ export class VerificationModule {
         .get(userId, guildId) as any;
 
       if (record?.status === "verified") {
-        await interaction.reply({ content: "✅ You're already verified!", ephemeral: true });
+        await interaction.reply({ content: "You're already verified!", ephemeral: true });
         return;
       }
 
       if (record?.attempts >= config.quiz.maxAttempts) {
-        await interaction.reply({ content: "❌ You've used all attempts. An admin will review your case.", ephemeral: true });
+        await interaction.reply({ content: "You've used all attempts. An admin will review your case.", ephemeral: true });
         return;
       }
 
@@ -139,12 +166,12 @@ export class VerificationModule {
         try {
           const authUrl = getOAuth2Url();
           await interaction.reply({
-            content: `🔒 You need to authorize the bot first!\n\nClick here: **[🔗 Authorize Bot](${authUrl})**\n\nThen click **✅ Verify Me** again.`,
+            content: `You need to authorize the bot first!\n\nClick here: **[Authorize Bot](${authUrl})**\n\nThen click **Verify Me** again.`,
             ephemeral: true,
           });
         } catch {
           await interaction.reply({
-            content: "🔒 You need to authorize the bot first! Ask an admin for help.",
+            content: "You need to authorize the bot first! Ask an admin for help.",
             ephemeral: true,
           });
         }
@@ -152,7 +179,7 @@ export class VerificationModule {
       }
 
       if (!config.quiz.questions.length && !config.quiz.finalQuestion) {
-        await interaction.reply({ content: "❌ No quiz configured. Admin needs to add questions with /quiz-add.", ephemeral: true });
+        await interaction.reply({ content: "No quiz configured. Admin needs to add questions with /quiz-add.", ephemeral: true });
         return;
       }
 
@@ -181,7 +208,7 @@ export class VerificationModule {
 
       console.log(`[Quiz] User ${userId} answers:`, JSON.stringify(answers));
 
-      await interaction.reply({ content: "✅ All answers submitted! Grading...", ephemeral: true });
+      await interaction.reply({ content: "All answers submitted! Grading...", ephemeral: true });
       setTimeout(() => this.grade(userId, guildId, interaction, answers), 500);
     });
   }
@@ -226,7 +253,7 @@ export class VerificationModule {
     if (!items.length) return;
 
     const actionRows = items.map((item) => {
-      const label = item.isFixed ? "📌 Fixed Question — type exactly" : `Q: ${truncate(item.question, 35)}`;
+      const label = item.isFixed ? "Fixed Question — type exactly" : `Q: ${truncate(item.question, 35)}`;
       const placeholder = item.isFixed
         ? `Type: ${item.correctAnswer}`
         : item.options.map((o, i) => `${String.fromCharCode(65 + i)}. ${o}`).join(" | ");
@@ -246,7 +273,7 @@ export class VerificationModule {
     const slotIdsStr = items.map((item) => item.slotId).join(",");
     const modal = new ModalBuilder()
       .setCustomId(`quiz_all_${interaction.user.id}_${guildId}_${slotIdsStr}`)
-      .setTitle(`🔐 Verification Quiz (${items.length} questions)`)
+      .setTitle(`Verification Quiz (${items.length} questions)`)
       .addComponents(...actionRows);
 
     try {
@@ -275,9 +302,9 @@ export class VerificationModule {
           correct++;
         } else {
           wrongQuestions.push(
-            `❌ **${config.quiz.finalQuestion.question}**\n` +
-            `   Their answer: **${answers[slotId] || "(empty)"}**\n` +
-            `   Correct answer: **${config.quiz.finalQuestion.expectedAnswer}**`
+            `**${config.quiz.finalQuestion.question}**\n` +
+            `Their answer: **${answers[slotId] || "(empty)"}**\n` +
+            `Correct answer: **${config.quiz.finalQuestion.expectedAnswer}**`
           );
         }
       } else {
@@ -294,9 +321,9 @@ export class VerificationModule {
         } else {
           const correctLetter = String.fromCharCode(65 + correctIdx);
           wrongQuestions.push(
-            `❌ **${q.question}**\n` +
-            `   Their answer: **${answers[slotId] || "(empty)"}**\n` +
-            `   Correct answer: **${correctLetter}. ${q.correctAnswer}**`
+            `**${q.question}**\n` +
+            `Their answer: **${answers[slotId] || "(empty)"}**\n` +
+            `Correct answer: **${correctLetter}. ${q.correctAnswer}**`
           );
         }
       }
@@ -318,42 +345,61 @@ export class VerificationModule {
         await member.roles.remove(config.roles.unverified);
 
         await this.sendLog(guildId,
-          `✅ **${username}** (<@${userId}>) **PASSED verification!**\n` +
-          `📊 Score: **${correct}/${total}** — All correct! — Attempt #${newAttempts}\n` +
-          `🎖️ Verified role assigned, Unverified role removed`
+          new EmbedBuilder()
+            .setColor(Colors.Green)
+            .setTitle("Verification Passed")
+            .setDescription(`**${username}** (<@${userId}>) passed the quiz`)
+            .addFields(
+              { name: "Score", value: `${correct}/${total} — All correct`, inline: true },
+              { name: "Attempt", value: `#${newAttempts}`, inline: true },
+              { name: "Roles", value: `Added <@&${config.roles.verified}>, Removed <@&${config.roles.unverified}>`, inline: false },
+            )
+            .setTimestamp()
         );
 
-        await interaction.followUp({ content: `🎉 **Passed!** ${correct}/${total} — All correct! You now have full access!`, ephemeral: true });
+        await interaction.followUp({ content: `**Passed!** ${correct}/${total} — All correct! You now have full access.`, ephemeral: true });
       } else {
         db.prepare("UPDATE verifications SET status = 'failed', attempts = ?, score = ?, answers_json = ? WHERE user_id = ? AND guild_id = ?")
           .run(newAttempts, correct, JSON.stringify(answers), userId, guildId);
 
-        const wrongBlock = wrongQuestions.length > 0
-          ? `\n\n**Wrong answers:**\n${wrongQuestions.join("\n\n")}`
-          : "";
         const remaining = config.quiz.maxAttempts - newAttempts;
 
         if (remaining > 0) {
+          const wrongField = wrongQuestions.length > 0 ? wrongQuestions.join("\n\n") : "None";
           await this.sendLog(guildId,
-            `❌ **${username}** (<@${userId}>) **FAILED verification**\n` +
-            `📊 Score: **${correct}/${total}** — All must be correct! — Attempt #${newAttempts}/${config.quiz.maxAttempts}\n` +
-            `${remaining} attempt${remaining > 1 ? "s" : ""} remaining` +
-            wrongBlock
+            new EmbedBuilder()
+              .setColor(Colors.Red)
+              .setTitle("Verification Failed")
+              .setDescription(`**${username}** (<@${userId}>) failed the quiz`)
+              .addFields(
+                { name: "Score", value: `${correct}/${total} — All must be correct`, inline: true },
+                { name: "Attempt", value: `#${newAttempts}/${config.quiz.maxAttempts}`, inline: true },
+                { name: "Remaining", value: `${remaining} attempt${remaining > 1 ? "s" : ""}`, inline: true },
+              )
+              .addFields({ name: "Wrong Answers", value: wrongField })
+              .setTimestamp()
           );
           await interaction.followUp({
-            content: `❌ **Failed** — ${correct}/${total}. All answers must be correct.\n${remaining} attempt${remaining > 1 ? "s" : ""} remaining.`,
+            content: `**Failed** — ${correct}/${total}. All answers must be correct.\n${remaining} attempt${remaining > 1 ? "s" : ""} remaining.`,
             ephemeral: true,
           });
         } else {
           db.prepare("UPDATE verifications SET status = 'flagged_review' WHERE user_id = ? AND guild_id = ?").run(userId, guildId);
 
+          const wrongField = wrongQuestions.length > 0 ? wrongQuestions.join("\n\n") : "None";
           await this.sendLog(guildId,
-            `⚠️ **${username}** (<@${userId}>) **EXHAUSTED all ${config.quiz.maxAttempts} attempts**\n` +
-            `📊 Final score: **${correct}/${total}**\n` +
-            `🚩 Flagged for admin review` +
-            wrongBlock
+            new EmbedBuilder()
+              .setColor(Colors.Orange)
+              .setTitle("Max Attempts Exhausted")
+              .setDescription(`**${username}** (<@${userId}>) used all ${config.quiz.maxAttempts} attempts`)
+              .addFields(
+                { name: "Final Score", value: `${correct}/${total}`, inline: true },
+                { name: "Status", value: "Flagged for admin review", inline: true },
+              )
+              .addFields({ name: "Wrong Answers", value: wrongField })
+              .setTimestamp()
           );
-          await interaction.followUp({ content: "❌ Max attempts reached. An admin will review your case.", ephemeral: true });
+          await interaction.followUp({ content: "Max attempts reached. An admin will review your case.", ephemeral: true });
         }
       }
     } catch (err) {
@@ -370,7 +416,7 @@ export class VerificationModule {
     const pending = (db.prepare("SELECT COUNT(*) as c FROM verifications WHERE guild_id = ? AND (status = 'pending' OR status = 'in_progress')").get(guildId) as any).c;
     const failed = (db.prepare("SELECT COUNT(*) as c FROM verifications WHERE guild_id = ? AND status = 'failed'").get(guildId) as any).c;
     const flagged = (db.prepare("SELECT COUNT(*) as c FROM verifications WHERE guild_id = ? AND status = 'flagged_review'").get(guildId) as any).c;
-    return `🔐 **Verification:** ${total} total, ${verified} verified, ${pending} pending, ${failed} failed, ${flagged} flagged`;
+    return `**Verification:** ${total} total | ${verified} verified | ${pending} pending | ${failed} failed | ${flagged} flagged`;
   }
 
   async manualVerify(userId: string, guildId: string): Promise<string> {
@@ -383,18 +429,22 @@ export class VerificationModule {
       getDb().prepare("UPDATE verifications SET status = 'verified', quiz_passed_at = datetime('now') WHERE user_id = ? AND guild_id = ?").run(userId, guildId);
 
       await this.sendLog(guildId,
-        `🛡️ **${member.user.username}** (<@${userId}>) manually verified by admin`
+        new EmbedBuilder()
+          .setColor(Colors.Green)
+          .setTitle("Manual Verification")
+          .setDescription(`**${member.user.username}** (<@${userId}>) was manually verified by an admin`)
+          .setTimestamp()
       );
 
-      return `✅ <@${userId}> manually verified`;
+      return `<@${userId}> manually verified`;
     } catch {
-      return `❌ Could not verify <@${userId}>`;
+      return `Could not verify <@${userId}>`;
     }
   }
 
   getFlagged(guildId: string): string {
     const users = getDb().prepare("SELECT user_id, attempts, score FROM verifications WHERE guild_id = ? AND status = 'flagged_review'").all(guildId) as any[];
-    if (!users.length) return "📋 No flagged users";
-    return "⚠️ **Flagged for review:**\n" + users.map((u) => `• <@${u.user_id}> — ${u.attempts} attempts, ${u.score}/${5}`).join("\n");
+    if (!users.length) return "No flagged users";
+    return "**Flagged for review:**\n" + users.map((u) => `<@${u.user_id}> — ${u.attempts} attempts, ${u.score}/${5}`).join("\n");
   }
 }
