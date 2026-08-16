@@ -25,7 +25,6 @@ export function getSetupCommands() {
       .addChannelOption((o) => o.setName("verification-channel").setDescription("Channel where welcome message + verify buttons are sent").setRequired(true))
       .addChannelOption((o) => o.setName("logs-channel").setDescription("Channel where detailed logs are sent (pass/fail details)").setRequired(true))
       // Quiz settings
-      .addIntegerOption((o) => o.setName("pass-percentage").setDescription("Quiz pass percentage (1-100)").setMinValue(1).setMaxValue(100).setRequired(false))
       .addIntegerOption((o) => o.setName("max-attempts").setDescription("Max quiz attempts per user (1-10)").setMinValue(1).setMaxValue(10).setRequired(false)),
   ];
 }
@@ -44,7 +43,6 @@ export async function handleSetupCommand(interaction: CommandInteraction, client
   const adminRole = interaction.options.getRole("admin-role", true);
   const verificationChannel = interaction.options.getChannel("verification-channel", true);
   const logsChannel = interaction.options.getChannel("logs-channel", true);
-  const passPercentage = interaction.options.getInteger("pass-percentage") ?? existingConfig.quiz.passPercentage;
   const maxAttempts = interaction.options.getInteger("max-attempts") ?? existingConfig.quiz.maxAttempts;
 
   // Save config
@@ -59,9 +57,9 @@ export async function handleSetupCommand(interaction: CommandInteraction, client
       logs: logsChannel.id,
     },
     quiz: {
-      passPercentage,
       maxAttempts,
       questions: existingConfig.quiz.questions,
+      finalQuestion: existingConfig.quiz.finalQuestion,
     },
     termsAndConditions: existingConfig.termsAndConditions,
   });
@@ -75,7 +73,7 @@ export async function handleSetupCommand(interaction: CommandInteraction, client
       `🟢 Verified: <@&${verifiedRole.id}>\n` +
       `🛡️ Admin: <@&${adminRole.id}>\n\n` +
       `**Channels:**\n✅ Verification: <#${verificationChannel.id}>\n📋 Logs: <#${logsChannel.id}>\n\n` +
-      `**Quiz:** ${questionCount} question(s), ${passPercentage}% pass, ${maxAttempts} attempt(s)\n\n` +
+      `**Quiz:** ${questionCount} question(s) in pool, ${maxAttempts} attempt(s), all must be correct\n\n` +
       `💡 Use **/set-rules** to customize server rules\n` +
       `💡 Use **/quiz-add** to add custom quiz questions\n\n` +
       (getGlobalConfig().oauth2.clientSecret

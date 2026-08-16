@@ -5,7 +5,7 @@ import {
   ModalBuilder, TextInputBuilder, TextInputStyle, TextChannel,
 } from "discord.js";
 import { getDb } from "../db.js";
-import { getGuildConfig, getGlobalConfig, GuildConfig, QuizQuestion, FinalQuestion } from "../config.js";
+import { getGuildConfig, GuildConfig, QuizQuestion, FinalQuestion } from "../config.js";
 import { getOAuth2Url, hasValidToken, truncate } from "../utils.js";
 
 /**
@@ -60,24 +60,55 @@ export class VerificationModule {
   }
 
   private setupListeners() {
-    // ── On member join ──
+    // ── On member join (or rejoin) ──
     this.client.on(Events.GuildMemberAdd, async (member: GuildMember) => {
       const guildId = member.guild.id;
       const config = getGuildConfig(guildId);
 
       if (!config.isSetup || !config.roles.unverified || !config.roles.verified || !config.channels.verification) return;
 
+      const wasReturning = getDb().prepare("SELECT status FROM verifications WHERE user_id = ? AND guild_id = ?")
+        .get(member.user.id, guildId) as any;
+
       try {
+        // Remove verified role if they had it (returning user)
+        if (member.roles.cache.has(config.roles.verified)) {
+          await member.roles.remove(config.roles.verified);
+        }
         await member.roles.add(config.roles.unverified);
       } catch (err) {
-        console.error(`[${guildId}] Failed to assign Unverified role to ${member.user.username}:`, err);
+        console.error(`[${guildId}] Failed to assign roles to ${member.user.username}:`, err);
         return;
       }
 
-      getDb().prepare("INSERT OR IGNORE INTO verifications (user_id, guild_id, status) VALUES (?, ?, 'pending')")
-        .run(member.user.id, guildId);
+      // Reset verification record — user must re-verify every time they join
+      getDb().prepare(`
+        INSERT INTO verifications (user_id, guild_id, status, attempts, score, answers_json, agreed_to_rules_at, quiz_started_at, quiz_passed_at)
+        VALUES (?, ?, 'pending', 0, 0, '[]', NULL, NULL, NULL)
+        ON CONFLICT(user_id, guild_id) DO UPDATE SET
+          status = 'pending',
+          attempts = 0,
+          score = 0,
+          answers_json = '[]',
+          agreed_to_rules_at = NULL,
+          quiz_started_at = NULL,
+          quiz_passed_at = NULL
+      `).run(member.user.id, guildId);
 
-      await this.sendLog(guildId, `👤 **${member.user.username}** (<@${member.user.id}>) joined — assigned Unverified role`);
+      if (wasReturning) {
+        await this.sendLog(guildId, `🔄 **${member.user.username}** (<@${member.user.id}>) rejoined — verification reset to Unverified`);
+      } else {
+        await this.sendLog(guildId, `👤 **${member.user.username}** (<@${member.user.id}>) joined — assigned Unverified role`);
+      }
+    });
+
+    // ── On member leave ──
+    this.client.on(Events.GuildMemberRemove, async (member: GuildMember) => {
+      const guildId = member.guild.id;
+      const config = getGuildConfig(guildId);
+      if (!config.isSetup) return;
+
+      await this.sendLog(guildId, `🚪 **${member.user.username}** (<@${member.user.id}>) left the server`);
     });
 
     // ── Handle "Verify Me" button (shared — anyone can click) ──
@@ -139,15 +170,13 @@ export class VerificationModule {
       const parts = interaction.customId.split("_");
       const userId = parts[2];
       const guildId = parts[3];
+      // parts[4] contains comma-separated slotIds that were in the modal
+      const slotIds = parts[4] ? parts[4].split(",").map(Number) : [];
 
-      const config = getGuildConfig(guildId);
       const answers: Record<number, string> = {};
-      for (const q of config.quiz.questions) {
-        answers[q.id - 1] = interaction.fields.getTextInputValue(`q_${q.id}`).trim();
-      }
-      // Fixed question
-      if (config.quiz.finalQuestion) {
-        answers[100] = interaction.fields.getTextInputValue("q_fixed").trim();
+      for (const slotId of slotIds) {
+        const fieldId = slotId === 100 ? "q_fixed" : `q_${slotId}`;
+        answers[slotId] = interaction.fields.getTextInputValue(fieldId).trim();
       }
 
       console.log(`[Quiz] User ${userId} answers:`, JSON.stringify(answers));
@@ -166,7 +195,7 @@ export class VerificationModule {
       ? shuffleArray(config.quiz.questions).slice(0, 4)
       : shuffleArray(config.quiz.questions);
 
-    pool.forEach((q, i) => {
+    pool.forEach((q) => {
       items.push({
         slotId: q.id,
         question: q.question,
@@ -213,8 +242,10 @@ export class VerificationModule {
       );
     });
 
+    // Encode selected slotIds in modal customId so grading knows exactly which questions to check
+    const slotIdsStr = items.map((item) => item.slotId).join(",");
     const modal = new ModalBuilder()
-      .setCustomId(`quiz_all_${interaction.user.id}_${guildId}`)
+      .setCustomId(`quiz_all_${interaction.user.id}_${guildId}_${slotIdsStr}`)
       .setTitle(`🔐 Verification Quiz (${items.length} questions)`)
       .addComponents(...actionRows);
 
@@ -230,28 +261,32 @@ export class VerificationModule {
     const db = getDb();
     let correct = 0;
     const wrongQuestions: string[] = [];
-    const items = this.buildQuizItems(config);
+    const total = Object.keys(answers).length;
 
-    for (const item of items) {
-      const userAns = (answers[item.slotId] || "").trim().toLowerCase();
+    // Check only the questions that were in the modal (by slotId from answers keys)
+    for (const slotIdStr of Object.keys(answers)) {
+      const slotId = Number(slotIdStr);
+      const userAns = (answers[slotId] || "").trim().toLowerCase();
 
-      if (item.isFixed) {
+      if (slotId === 100 && config.quiz.finalQuestion) {
         // Fixed question: exact match (case-insensitive, trimmed)
-        const expected = item.correctAnswer.trim().toLowerCase();
+        const expected = config.quiz.finalQuestion.expectedAnswer.trim().toLowerCase();
         if (userAns === expected) {
           correct++;
         } else {
           wrongQuestions.push(
-            `❌ **${item.question}**\n` +
-            `   Their answer: **${answers[item.slotId] || "(empty)"}**\n` +
-            `   Correct answer: **${item.correctAnswer}**`
+            `❌ **${config.quiz.finalQuestion.question}**\n` +
+            `   Their answer: **${answers[slotId] || "(empty)"}**\n` +
+            `   Correct answer: **${config.quiz.finalQuestion.expectedAnswer}**`
           );
         }
       } else {
-        // MCQ: exact match (case-insensitive) — text or letter
-        const correctIdx = item.options.findIndex((o) => o.toLowerCase() === item.correctAnswer.toLowerCase());
+        // MCQ from pool
+        const q = config.quiz.questions.find((q) => q.id === slotId);
+        if (!q) continue;
+        const correctIdx = q.options.findIndex((o) => o.toLowerCase() === q.correctAnswer.toLowerCase());
         if (
-          userAns === item.correctAnswer.toLowerCase() ||
+          userAns === q.correctAnswer.toLowerCase() ||
           userAns === String(correctIdx) ||
           userAns === String.fromCharCode(65 + correctIdx).toLowerCase()
         ) {
@@ -259,15 +294,14 @@ export class VerificationModule {
         } else {
           const correctLetter = String.fromCharCode(65 + correctIdx);
           wrongQuestions.push(
-            `❌ **${item.question}**\n` +
-            `   Their answer: **${answers[item.slotId] || "(empty)"}**\n` +
-            `   Correct answer: **${correctLetter}. ${item.correctAnswer}**`
+            `❌ **${q.question}**\n` +
+            `   Their answer: **${answers[slotId] || "(empty)"}**\n` +
+            `   Correct answer: **${correctLetter}. ${q.correctAnswer}**`
           );
         }
       }
     }
 
-    const total = items.length;
     const passed = correct === total; // all must be correct
     const record = db.prepare("SELECT attempts FROM verifications WHERE user_id = ? AND guild_id = ?").get(userId, guildId) as any;
     const newAttempts = (record?.attempts || 0) + 1;
