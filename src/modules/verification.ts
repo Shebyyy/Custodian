@@ -118,12 +118,12 @@ export class VerificationModule {
         return;
       }
 
-      await interaction.reply({ content: "📝 Starting quiz...", ephemeral: true });
       db.prepare("UPDATE verifications SET agreed_to_rules_at = datetime('now'), quiz_started_at = datetime('now'), status = 'in_progress' WHERE user_id = ? AND guild_id = ?")
         .run(targetUserId, guildId);
 
       this.quizInProgress.set(`${targetUserId}:${guildId}`, { questionIndex: 0, answers: {}, channelId: interaction.channelId, guildId });
-      setTimeout(() => this.sendQuizModal(interaction, 0, guildId), 500);
+      // Show modal directly — can't reply then showModal
+      await this.sendQuizModal(interaction, 0, guildId);
     });
 
     // ── Handle quiz modal submissions ──
