@@ -6,7 +6,10 @@ import {
 } from "discord.js";
 import { getDb } from "../db.js";
 import { getGuildConfig, GuildConfig, QuizQuestion, FinalQuestion } from "../config.js";
-import { getOAuth2Url, hasValidToken, truncate } from "../utils.js";
+import {
+  clearPendingAuthInteraction, editEphemeralMessage, getOAuth2Url, getPendingAuthInteraction,
+  hasValidToken, storePendingAuthInteraction, truncate,
+} from "../utils.js";
 
 /**
  * Module 3 — Verification + Quiz Gate (Shared Panel, Multi-Server)
@@ -36,6 +39,20 @@ function shuffleArray<T>(arr: T[]): T[] {
     [a[i], a[j]] = [a[j], a[i]];
   }
   return a;
+}
+
+/** Shared embed styling used across all verification prompts (public + ephemeral). */
+export function buildVerificationEmbed(description: string, includeFooter: boolean = true): EmbedBuilder {
+  const embed = new EmbedBuilder()
+    .setColor(1564442)
+    .setDescription(description)
+    .setThumbnail("https://github.com/RyanYuuki/AnymeX/raw/main/assets/images/logo.png");
+  if (includeFooter) {
+    embed.setFooter({
+      text: "Due to Discord constantly taking AnymeX down, the bot will use the “Join Servers for You” permission to automatically have you rejoin the new server if this one gets taken down.\n",
+    });
+  }
+  return embed;
 }
 
 export class VerificationModule {
@@ -164,9 +181,18 @@ export class VerificationModule {
 
       if (!hasValidToken(userId)) {
         try {
-          const authUrl = getOAuth2Url();
+          const authUrl = getOAuth2Url(userId, guildId);
+          storePendingAuthInteraction(userId, interaction.applicationId, interaction.token, guildId);
+
+          const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+            new ButtonBuilder().setURL(authUrl).setLabel("🔗 Authorize Bot").setStyle(ButtonStyle.Link)
+          );
+
           await interaction.reply({
-            content: `You need to authorize the bot first!\n\nClick here: **[Authorize Bot](${authUrl})**\n\nThen click **Verify Me** again.`,
+            embeds: [buildVerificationEmbed(
+              "#  You Need to Authorize First\n### 1️⃣ Click the **Authorize Bot** button below to link your Discord account\n### 2️⃣ After you authorize, the **Verify Me** button will appear right here\n### 3️⃣ Click it to take a quick quiz"
+            )],
+            components: [row],
             flags: MessageFlags.Ephemeral,
           });
         } catch {
@@ -187,6 +213,38 @@ export class VerificationModule {
         .run(userId, guildId);
 
       await this.sendQuizModal(interaction, guildId);
+    });
+
+    // ── Handle "Authorize Bot" button (captures interaction for post-auth prompt) ──
+    this.client.on(Events.InteractionCreate, async (interaction: Interaction) => {
+      if (!interaction.isButton()) return;
+      if (!interaction.customId.startsWith("auth_start:")) return;
+
+      const guildId = interaction.customId.split(":")[1];
+      const userId = interaction.user.id;
+
+      try {
+        const authUrl = getOAuth2Url(userId, guildId);
+        storePendingAuthInteraction(userId, interaction.applicationId, interaction.token, guildId);
+
+        const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+          new ButtonBuilder().setURL(authUrl).setLabel("🔗 Click here to Authorize").setStyle(ButtonStyle.Link)
+        );
+
+        await interaction.reply({
+          embeds: [buildVerificationEmbed(
+            "#  Authorize Your Account\n### 1️⃣ Click the **Authorize** button below to link your Discord account\n### 2️⃣ After you authorize, a **Verify Me** button will appear right here\n### 3️⃣ Click it to take a quick quiz"
+          )],
+          components: [row],
+          flags: MessageFlags.Ephemeral,
+        });
+      } catch (err) {
+        console.error(`[${guildId}] Failed to start authorization for ${userId}:`, err);
+        await interaction.reply({
+          content: "Something went wrong starting authorization. Ask an admin for help.",
+          flags: MessageFlags.Ephemeral,
+        }).catch(() => {});
+      }
     });
 
     // ── Handle quiz modal submissions ──
@@ -446,5 +504,38 @@ export class VerificationModule {
     const users = getDb().prepare("SELECT user_id, attempts, score FROM verifications WHERE guild_id = ? AND status = 'flagged_review'").all(guildId) as any[];
     if (!users.length) return "No flagged users";
     return "**Flagged for review:**\n" + users.map((u) => `<@${u.user_id}> — ${u.attempts} attempts, ${u.score}/${5}`).join("\n");
+  }
+}
+
+/**
+ * Called by the OAuth2 callback after a user authorizes.
+ * Updates the user's pending ephemeral message (from the Authorize button)
+ * to show the Verify Me button now that they have a valid token.
+ */
+export async function notifyAuthorized(userId: string): Promise<void> {
+  const pending = getPendingAuthInteraction(userId);
+  if (!pending) return;
+
+  clearPendingAuthInteraction(userId);
+
+  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`verify_start:${pending.guild_id}`)
+      .setLabel("✅ Verify Me")
+      .setStyle(ButtonStyle.Success)
+  );
+
+  const ok = await editEphemeralMessage(
+    pending.application_id,
+    pending.interaction_token,
+    "",
+    [row],
+    [buildVerificationEmbed(
+      "#  Authorization Complete ✅\n### Click **Verify Me** below to take the quiz and get full access"
+    )],
+  );
+
+  if (!ok) {
+    console.warn(`[Verification] Could not update auth prompt for ${userId} (interaction may have expired).`);
   }
 }

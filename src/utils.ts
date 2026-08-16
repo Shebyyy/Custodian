@@ -229,6 +229,68 @@ export function storeOAuthToken(
 }
 
 /**
+ * Store a pending interaction (from the Authorize button) so the OAuth2
+ * callback can update it with the Verify Me button once the user authorizes.
+ */
+export function storePendingAuthInteraction(
+  userId: string,
+  applicationId: string,
+  interactionToken: string,
+  guildId: string,
+): void {
+  getDb().prepare(`
+    INSERT OR REPLACE INTO auth_pending (user_id, application_id, interaction_token, guild_id, created_at)
+    VALUES (?, ?, ?, ?, datetime('now'))
+  `).run(userId, applicationId, interactionToken, guildId);
+}
+
+/**
+ * Get the pending interaction stored for a user (if any).
+ */
+export function getPendingAuthInteraction(userId: string): {
+  application_id: string;
+  interaction_token: string;
+  guild_id: string;
+} | null {
+  const row = getDb().prepare(
+    "SELECT application_id, interaction_token, guild_id FROM auth_pending WHERE user_id = ?"
+  ).get(userId) as any;
+  return row || null;
+}
+
+export function clearPendingAuthInteraction(userId: string): void {
+  getDb().prepare("DELETE FROM auth_pending WHERE user_id = ?").run(userId);
+}
+
+/**
+ * Edit a previously-sent ephemeral interaction message via the interaction webhook.
+ * Used to swap the Authorize prompt for the Verify Me button after OAuth2 completes.
+ */
+export async function editEphemeralMessage(
+  applicationId: string,
+  interactionToken: string,
+  content: string,
+  components?: any[],
+  embeds?: any[],
+): Promise<boolean> {
+  const body: any = { content, components: components || [] };
+  if (embeds && embeds.length) body.embeds = embeds;
+
+  const res = await fetch(
+    `${DISCORD_API}/webhooks/${applicationId}/${interactionToken}/messages/@original`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
+  if (!res.ok) {
+    console.warn(`[OAuth] Failed to update auth prompt: ${res.status}`);
+  }
+  return res.ok;
+}
+
+/**
  * Check if a user has a valid (non-expired) OAuth2 token.
  */
 export function hasValidToken(userId: string): boolean {

@@ -1,11 +1,11 @@
 // @ts-nocheck — discord.js type quirks with bun
 import {
-  Client, CommandInteraction, Interaction, MessageFlags, ModalBuilder, EmbedBuilder,
+  Client, CommandInteraction, Interaction, MessageFlags, ModalBuilder,
   ActionRowBuilder, ButtonBuilder, ButtonStyle, TextInputBuilder, TextInputStyle,
   SlashCommandBuilder, PermissionFlagsBits,
 } from "discord.js";
 import { getGuildConfig, saveGuildConfig, QuizQuestion, FinalQuestion } from "../config.js";
-import { getOAuth2Url } from "../utils.js";
+import { buildVerificationEmbed } from "../modules/verification.js";
 
 // ─── /post-verify ───
 export function getPostVerifyCommand() {
@@ -26,12 +26,8 @@ export async function handlePostVerifyCommand(interaction: CommandInteraction, c
 
   const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder()
-      .setURL(getOAuth2Url())
-      .setLabel("🔗 Authorize Bot")
-      .setStyle(ButtonStyle.Link),
-    new ButtonBuilder()
-      .setCustomId(`verify_start:${guildId}`)
-      .setLabel("✅ Verify Me")
+      .setCustomId(`auth_start:${guildId}`)
+      .setLabel("🚀 Start")
       .setStyle(ButtonStyle.Success)
   );
 
@@ -44,15 +40,9 @@ export async function handlePostVerifyCommand(interaction: CommandInteraction, c
 
     await (channel as any).send({
       embeds: [
-        new EmbedBuilder()
-          .setColor(1564442)
-          .setDescription("#  User Verification\n## New here? Read the rules above, then follow these steps:\n### 1️⃣ Click 🔗 Authorize Bot to link your account\n### 2️⃣ Click ✅ Verify Me to take a quick quiz\n### 3️⃣ Pass and you're in!")
-          .setThumbnail("https://github.com/RyanYuuki/AnymeX/raw/main/assets/images/logo.png")
-          .setFooter({
-            text: "Due to Discord constantly taking AnymeX down, the bot will use the “Join Servers for You” permission to automatically have you rejoin the new server if this one gets taken down.\n",
-          })
-          .setFields(
-          ),
+        buildVerificationEmbed(
+          "#  User Verification\n## New here? Read the rules above, then follow these steps:\n### 1️⃣ Click 🚀 Start to link your account\n### 2️⃣ A **Verify Me** button will appear — click it to take a quick quiz\n### 3️⃣ Pass and you're in!"
+        ),
       ],
       components: [row],
     });

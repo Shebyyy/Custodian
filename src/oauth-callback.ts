@@ -1,5 +1,6 @@
 // @ts-nocheck — Bun.serve type quirks
 import { exchangeCode, storeOAuthToken, truncate } from "./utils.js";
+import { notifyAuthorized } from "./modules/verification.js";
 
 /**
  * Tiny HTTP server that handles the OAuth2 callback.
@@ -50,6 +51,11 @@ try {
           storeOAuthToken(userData.id, tokens.access_token, tokens.refresh_token, tokens.expires_in, tokens.scope);
 
           console.log(`✅ OAuth2 token stored for user ${userData.username} (${userData.id})`);
+
+          // Update the user's pending ephemeral message with the Verify Me button
+          notifyAuthorized(userData.id).catch((err: any) => {
+            console.warn(`[OAuth] notifyAuthorized failed for ${userData.id}:`, err?.message);
+          });
 
           return new Response(
             `✅ Authorized as **${userData.username}**! You can close this tab now.\n\nCustodian can now add you to servers when needed. Go back to Discord.`,

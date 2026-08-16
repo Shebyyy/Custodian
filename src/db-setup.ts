@@ -213,6 +213,16 @@ db.exec(`
     scope TEXT DEFAULT '',
     authorized_at TEXT DEFAULT (datetime('now'))
   );
+
+  -- Pending interaction from the Authorize button click, so the OAuth2
+  -- callback can update that ephemeral message with the Verify Me button.
+  CREATE TABLE IF NOT EXISTS auth_pending (
+    user_id TEXT PRIMARY KEY,
+    application_id TEXT NOT NULL,
+    interaction_token TEXT NOT NULL,
+    guild_id TEXT NOT NULL DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now'))
+  );
 `);
 
 console.log("✅ Database tables created at:", DB_PATH);
