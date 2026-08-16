@@ -65,10 +65,9 @@ jobs:
             bun run db:setup
             echo "OK: database ready"
 
-            # Kill ALL old Custodian bot processes
+            # Kill old Custodian bot processes (safe — uses grep [b]un trick to avoid self-match)
             echo "[6/6] Restarting bot..."
-            pkill -9 -f "bun.*Custodian/src/index.ts" 2>/dev/null || true
-            pkill -9 -f "bun.*index.ts" 2>/dev/null || true
+            ps aux | grep "[b]un run.*src/index.ts" | awk '{print $2}' | xargs -r kill -9 2>/dev/null || true
             sleep 2
 
             # Start
