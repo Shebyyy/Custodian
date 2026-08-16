@@ -1,6 +1,6 @@
 // @ts-nocheck — discord.js type quirks with bun
 import {
-  Client, CommandInteraction, Interaction, MessageFlags, ModalBuilder,
+  Client, CommandInteraction, Interaction, MessageFlags, ModalBuilder, EmbedBuilder,
   ActionRowBuilder, ButtonBuilder, ButtonStyle, TextInputBuilder, TextInputStyle,
   SlashCommandBuilder, PermissionFlagsBits,
 } from "discord.js";
@@ -43,7 +43,17 @@ export async function handlePostVerifyCommand(interaction: CommandInteraction, c
     }
 
     await (channel as any).send({
-      content: `New here? Read the rules above, then follow these steps:\n\n1️⃣ Click **🔗 Authorize Bot** to link your account\n2️⃣ Click **✅ Verify Me** to take a quick quiz\n3️⃣ Pass and you're in!`,
+      embeds: [
+        new EmbedBuilder()
+          .setColor(1564442)
+          .setDescription("#  User Verification\n## New here? Read the rules above, then follow these steps:\n### 1️⃣ Click 🔗 Authorize Bot to link your account\n### 2️⃣ Click ✅ Verify Me to take a quick quiz\n### 3️⃣ Pass and you're in!")
+          .setThumbnail("https://github.com/RyanYuuki/AnymeX/raw/main/assets/images/logo.png")
+          .setFooter({
+            text: "Due to Discord constantly taking AnymeX down, the bot will use the “Join Servers for You” permission to automatically have you rejoin the new server if this one gets taken down.\n",
+          })
+          .setFields(
+          ),
+      ],
       components: [row],
     });
 
