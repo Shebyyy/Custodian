@@ -121,41 +121,28 @@ export class VerificationModule {
       db.prepare("UPDATE verifications SET agreed_to_rules_at = datetime('now'), quiz_started_at = datetime('now'), status = 'in_progress' WHERE user_id = ? AND guild_id = ?")
         .run(targetUserId, guildId);
 
-      this.quizInProgress.set(`${targetUserId}:${guildId}`, { questionIndex: 0, answers: {}, channelId: interaction.channelId, guildId });
-      // Show modal directly — can't reply then showModal
-      await this.sendQuizModal(interaction, 0, guildId);
+      // Show all questions in one modal
+      await this.sendQuizModal(interaction, guildId);
     });
 
     // ── Handle quiz modal submissions ──
     this.client.on(Events.InteractionCreate, async (interaction: Interaction) => {
       if (!interaction.isModalSubmit()) return;
-      if (!interaction.customId.startsWith("quiz_")) return;
+      if (!interaction.customId.startsWith("quiz_all_")) return;
 
       const parts = interaction.customId.split("_");
-      const idx = parseInt(parts[1], 10);
+      // quiz_all_{userId}_{guildId}
       const userId = parts[2];
       const guildId = parts[3];
-      const answer = interaction.fields.getTextInputValue("quiz_answer");
 
-      const stateKey = `${userId}:${guildId}`;
-      const state = this.quizInProgress.get(stateKey);
-      if (!state) {
-        await interaction.reply({ content: "❌ No active quiz. Click 'Verify Me' to start.", ephemeral: true });
-        return;
-      }
-
-      state.answers[idx] = answer;
       const config = getGuildConfig(guildId);
-      const next = idx + 1;
-
-      if (next < config.quiz.questions.length) {
-        state.questionIndex = next;
-        await interaction.reply({ content: `✅ Answer recorded. Next question...`, ephemeral: true });
-        setTimeout(() => this.sendQuizModal(interaction, next, guildId), 500);
-      } else {
-        await interaction.reply({ content: "✅ All answers submitted! Grading...", ephemeral: true });
-        setTimeout(() => this.grade(userId, guildId, interaction, state.answers, state.channelId), 500);
+      const answers: Record<number, string> = {};
+      for (const q of config.quiz.questions) {
+        answers[q.id - 1] = interaction.fields.getTextInputValue(`q_${q.id}`).trim();
       }
+
+      await interaction.reply({ content: "✅ All answers submitted! Grading...", ephemeral: true });
+      setTimeout(() => this.grade(userId, guildId, interaction, answers, interaction.channelId), 500);
     });
   }
 
@@ -167,28 +154,29 @@ export class VerificationModule {
     }
   }
 
-  private async sendQuizModal(interaction: any, idx: number, guildId: string) {
+  private async sendQuizModal(interaction: any, guildId: string) {
     const config = getGuildConfig(guildId);
-    const q: QuizQuestion = config.quiz.questions[idx];
-    if (!q) return;
+    const questions = config.quiz.questions.slice(0, 5); // Discord max 5 fields
 
-    const total = config.quiz.questions.length;
-    const optionsText = q.options.map((o, i) => `${String.fromCharCode(65 + i)}. ${o}`).join("  |  ");
+    if (!questions.length) return;
+
+    const actionRows = questions.map((q) => {
+      const optionsText = q.options.map((o, i) => `${String.fromCharCode(65 + i)}. ${o}`).join(" | ");
+      return new ActionRowBuilder<TextInputBuilder>().addComponents(
+        new TextInputBuilder()
+          .setCustomId(`q_${q.id}`)
+          .setLabel(`Q${q.id}: ${truncate(q.question, 40)}`)
+          .setStyle(TextInputStyle.Short)
+          .setPlaceholder(`A, B, or answer (${optionsText})`)
+          .setRequired(true)
+          .setMaxLength(100)
+      );
+    });
 
     const modal = new ModalBuilder()
-      .setCustomId(`quiz_${idx}_${interaction.user.id}_${guildId}`)
-      .setTitle(`Verification Q${idx + 1}/${total}`)
-      .addComponents(
-        new ActionRowBuilder<TextInputBuilder>().addComponents(
-          new TextInputBuilder()
-            .setCustomId("quiz_answer")
-            .setLabel(truncate(q.question, 45))
-            .setStyle(TextInputStyle.Short)
-            .setPlaceholder(`Type A, B, or the answer (${optionsText})`)
-            .setRequired(true)
-            .setMaxLength(100)
-        )
-      );
+      .setCustomId(`quiz_all_${interaction.user.id}_${guildId}`)
+      .setTitle(`🔐 Verification Quiz (${questions.length} questions)`)
+      .addComponents(...actionRows);
 
     try {
       await interaction.showModal(modal);
