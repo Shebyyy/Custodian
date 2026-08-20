@@ -1,10 +1,11 @@
 // @ts-nocheck — discord.js type quirks with bun
 import {
   Client, Events, GatewayIntentBits, Interaction, MessageFlags, Partials,
-  SlashCommandBuilder,
+  SlashCommandBuilder, ChannelType,
+  ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder,
 } from "discord.js";
 
-import { getGlobalConfig, setClientId, getGuildConfig, loadChannelMappings, saveChannelMappings } from "./config.js";
+import { getGlobalConfig, setClientId, getGuildConfig } from "./config.js";
 import { ChannelBackupModule } from "./modules/channel-backup.js";
 import { MemberTrackingModule } from "./modules/member-tracking.js";
 import { VerificationModule } from "./modules/verification.js";
@@ -39,168 +40,272 @@ const client = new Client({
 const channelBackup = new ChannelBackupModule(client);
 const memberTracking = new MemberTrackingModule(client);
 const verification = new VerificationModule(client);
-const restoreModule = new RestoreModule(client);
+const restoreModule = new RestoreModule(client, channelBackup);
 const migrationModule = new MigrationModule(client);
 
 // ─── Slash Commands ───
 const commands = [
-  // Setup (per-guild) — uses role/channel pickers
+  // Setup (per-guild)
   ...getSetupCommands(),
 
-  // Module 1: Backup (per-guild)
-  new SlashCommandBuilder().setName("backup-add").setDescription("Register a channel for backup")
-    .addChannelOption((o) => o.setName("channel").setDescription("Channel to back up").setRequired(true)),
-  new SlashCommandBuilder().setName("backup-remove").setDescription("Unregister a channel from backup")
-    .addChannelOption((o) => o.setName("channel").setDescription("Channel to remove").setRequired(true)),
-  new SlashCommandBuilder().setName("backup-list").setDescription("List all backed up channels"),
-  new SlashCommandBuilder().setName("backup-export").setDescription("Export a channel's backup as JSON")
-    .addChannelOption((o) => o.setName("channel").setDescription("Channel to export").setRequired(true)),
+  // ── Backup Commands ──
+  new SlashCommandBuilder()
+    .setName("backup")
+    .setDescription("Enable or disable backup for this server")
+    .addSubcommand((s) => s.setName("enable").setDescription("Enable backup for this server"))
+    .addSubcommand((s) => s.setName("disable").setDescription("Disable backup for this server"))
+    .addSubcommand((s) => s.setName("status").setDescription("View backup status and stats"))
+    .addSubcommand((s) => s
+      .setName("fetch")
+      .setDescription("Backfill old messages from channel(s)")
+      .addChannelOption((o) => o
+        .setName("channel")
+        .setDescription("Specific channel to fetch (omits = all channels)")
+        .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement, ChannelType.GuildForum)
+      )
+    )
+    .addSubcommand((s) => s.setName("purge").setDescription("Delete all backup data for this server"))
+    .addSubcommand((s) => s.setName("export").setDescription("Export a channel's backup as JSON")
+      .addChannelOption((o) => o.setName("channel").setDescription("Channel to export").setRequired(true))
+    ),
 
-  // Module 2: Members (per-guild)
-  new SlashCommandBuilder().setName("members-stats").setDescription("View member statistics for this server"),
+  // ── Restore Commands ──
+  new SlashCommandBuilder()
+    .setName("restore")
+    .setDescription("Start the restore flow — map backed-up channels to current server"),
+  new SlashCommandBuilder()
+    .setName("restore-mappings")
+    .setDescription("View current channel mappings"),
+  new SlashCommandBuilder()
+    .setName("restore-clear")
+    .setDescription("Clear all channel mappings"),
+  new SlashCommandBuilder()
+    .setName("restore-preview")
+    .setDescription("Preview backed-up messages (dry run)")
+    .addStringOption((o) => o.setName("channel-id").setDescription("Channel ID to preview").setRequired(true))
+    .addIntegerOption((o) => o.setName("count").setDescription("Number of messages to show").setMinValue(1).setMaxValue(50)),
 
-  // Module 3: Verification (per-guild)
-  new SlashCommandBuilder().setName("verify-stats").setDescription("View verification stats for this server"),
+  // ── Member Commands ──
+  new SlashCommandBuilder().setName("members-stats").setDescription("View member statistics"),
+
+  // ── Verification Commands ──
+  new SlashCommandBuilder().setName("verify-stats").setDescription("View verification stats"),
   new SlashCommandBuilder().setName("verify-manual").setDescription("Manually verify a user")
     .addUserOption((o) => o.setName("user").setDescription("User to verify").setRequired(true)),
   new SlashCommandBuilder().setName("verify-flagged").setDescription("View users flagged for review"),
 
-  // Rules & Quiz management (admin)
+  // ── Quiz Management ──
   getPostVerifyCommand(),
   getSetFinalQuestionCommand(),
   getQuizAddCommand(),
   getQuizListCommand(),
   getQuizRemoveCommand(),
 
-  // Module 5: Migration (global — tokens work across servers)
+  // ── Migration Commands ──
   new SlashCommandBuilder().setName("migrate-add").setDescription("Add authorized users to a server directly")
     .addStringOption((o) => o.setName("guild-id").setDescription("Target server ID").setRequired(true))
     .addStringOption((o) => o.setName("role-id").setDescription("Role to assign on join (optional)")),
   new SlashCommandBuilder().setName("migrate-status").setDescription("View OAuth2 authorization status"),
-
-  // Module 4: Restore (per-guild)
-  new SlashCommandBuilder().setName("restore-map").setDescription("Map old channel to new channel")
-    .addChannelOption((o) => o.setName("source").setDescription("Old channel").setRequired(true))
-    .addChannelOption((o) => o.setName("target").setDescription("New channel").setRequired(true)),
-  new SlashCommandBuilder().setName("restore-unmap").setDescription("Remove a channel mapping")
-    .addChannelOption((o) => o.setName("source").setDescription("Old channel").setRequired(true)),
-  new SlashCommandBuilder().setName("restore-list").setDescription("List all mappings"),
-  new SlashCommandBuilder().setName("restore-preview").setDescription("Preview a restore (dry run)")
-    .addChannelOption((o) => o.setName("source").setDescription("Old channel").setRequired(true)),
-  new SlashCommandBuilder().setName("restore-run").setDescription("Run restore for a mapped channel")
-    .addChannelOption((o) => o.setName("source").setDescription("Old channel").setRequired(true)),
 ];
 
 // ─── Ready ───
 client.once(Events.ClientReady, async () => {
-  console.log(`✅ Custodian is online as ${client.user?.tag}`);
+  console.log(`Custodian is online as ${client.user?.tag}`);
 
   if (client.user) {
     setClientId(client.user.id);
-    console.log(`📝 Client ID: ${client.user.id}`);
+    console.log(`Client ID: ${client.user.id}`);
   }
 
   try {
-    // Clear stale guild-specific commands (from accidental per-guild registration)
-    // Guild commands override global — must delete them
+    // Clear stale guild-specific commands
     for (const [id, guild] of client.guilds.cache) {
       try {
         const existing = await guild.commands.fetch();
         if (existing.size > 0) {
           await guild.commands.set([]);
-          console.log(`🧹 Cleared ${existing.size} stale guild commands in ${guild.name}`);
-        } else {
-          console.log(`✓ No guild commands in ${guild.name}`);
+          console.log(`Cleared ${existing.size} stale guild commands in ${guild.name}`);
         }
       } catch (err: any) {
-        console.warn(`⚠ Failed to fetch guild commands for ${guild.name}: ${err.message}`);
-        // Force delete via REST API as fallback
+        console.warn(`Failed to fetch guild commands for ${guild.name}: ${err.message}`);
         try {
           await client.rest.put(`/applications/${client.user!.id}/guilds/${id}/commands`, []);
-          console.log(`🧹 Force-cleared guild commands in ${guild.name} via REST`);
-        } catch (err2: any) {
-          console.warn(`⚠ REST fallback also failed: ${err2.message}`);
-        }
+        } catch {}
       }
     }
-    // Register global commands (works for all servers)
+    // Register global commands
     await client.application?.commands.set(commands as any);
-    console.log(`📝 ${commands.length} slash commands registered`);
+    console.log(`${commands.length} slash commands registered`);
   } catch (err) {
     console.error("Failed to register commands:", err);
   }
 
   // Show which guilds the bot is in
-  console.log(`🌍 Serving ${client.guilds.cache.size} server(s):`);
+  console.log(`Serving ${client.guilds.cache.size} server(s):`);
   for (const [id, guild] of client.guilds.cache) {
     const cfg = getGuildConfig(id);
-    console.log(`  → ${guild.name} (${id}) — ${cfg.isSetup ? "✅ configured" : "⚠️ not set up"}`);
+    console.log(`  ${guild.name} (${id}) — ${cfg.isSetup ? "configured" : "not set up"}`);
   }
 });
 
 // ─── Interaction Handler ───
 client.on(Events.InteractionCreate, async (interaction: Interaction) => {
-  // Handle setup modal submissions
+  // Handle modal submissions first
   if (interaction.isModalSubmit()) {
     const handled = await handleSetupInteraction(interaction, client);
     if (handled) return;
     const handled2 = await handleManagementModal(interaction, client);
     if (handled2) return;
+
+    // Backup purge confirmation modal
+    if (interaction.customId === "backup_purge_confirm") {
+      const confirm = interaction.fields.getTextInputValue("purge_confirm");
+      const guildId = interaction.guild?.id;
+      if (confirm !== "PURGE" || !guildId) {
+        await interaction.reply({ content: "Purge cancelled. You must type exactly `PURGE`.", flags: MessageFlags.Ephemeral });
+        return;
+      }
+      const result = channelBackup.purgeBackup(guildId);
+      await interaction.reply({
+        content: `Purged **${result.channelCount}** channels and **${result.messageCount}** messages from backup.`,
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    return;
   }
 
-  if (!interaction.isChatInputCommand()) return;
+  // Handle restore flow interactions (select menus, buttons)
+  if (!interaction.isChatInputCommand()) {
+    if (interaction.isStringSelectMenu() || interaction.isChannelSelectMenu() || interaction.isButton()) {
+      try {
+        const handled = await restoreModule.handleInteraction(interaction as any);
+        if (handled) return;
+      } catch (err: any) {
+        console.error("Restore interaction error:", err);
+        try {
+          await (interaction as any).reply({ content: `Error: ${err.message}`, flags: MessageFlags.Ephemeral });
+        } catch {}
+      }
+    }
+    return;
+  }
+
+  // Slash commands
   const { commandName, options } = interaction;
+  const subcommand = options.getSubcommand(false);
   const guildId = interaction.guild?.id || "";
 
-  // Don't deferReply for commands that show their own modal
-  if (commandName !== "setup" && commandName !== "post-verify" && commandName !== "quiz-add" && commandName !== "set-final-question") {
+  // Don't deferReply for commands that show their own modal or need the interaction token
+  const needsDefer = commandName !== "setup"
+    && commandName !== "post-verify"
+    && commandName !== "quiz-add"
+    && commandName !== "set-final-question"
+    && !(commandName === "backup" && subcommand === "purge");
+  if (needsDefer) {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
   }
 
   try {
     switch (commandName) {
-      // ── Setup (per-guild) ──
+      // ── Setup ──
       case "setup":
         await handleSetupCommand(interaction, client);
         break;
 
-      // ── Module 1: Backup ──
-      case "backup-add": {
-        const ch = options.getChannel("channel", true);
-        await interaction.editReply(channelBackup.addChannel(ch.id, ch.name || ch.id, guildId));
-        break;
-      }
-      case "backup-remove": {
-        const ch = options.getChannel("channel", true);
-        await interaction.editReply(channelBackup.removeChannel(ch.id));
-        break;
-      }
-      case "backup-list": {
-        await interaction.editReply(channelBackup.listChannels());
-        break;
-      }
-      case "backup-export": {
-        const ch = options.getChannel("channel", true);
-        const { content, filename } = channelBackup.exportChannel(ch.id);
-        if (content.length > 2000) {
-          const buffer = Buffer.from(content, "utf-8");
-          await interaction.editReply({ content: `📦 Backup for <#${ch.id}>:`, files: [{ attachment: buffer, name: filename }] });
-        } else {
-          await interaction.editReply(content);
+      // ── Backup ──
+      case "backup": {
+        switch (subcommand) {
+          case "enable": {
+            if (!interaction.guild) break;
+            const result = channelBackup.enableBackup(interaction.guild);
+            await interaction.editReply(result);
+            break;
+          }
+          case "disable": {
+            if (!guildId) break;
+            const result = channelBackup.disableBackup(guildId);
+            await interaction.editReply(result);
+            break;
+          }
+          case "status": {
+            await interaction.editReply(channelBackup.getStatus(guildId));
+            break;
+          }
+          case "fetch": {
+            if (!interaction.guild) break;
+            const targetChannel = options.getChannel("channel") as any;
+            await interaction.editReply("Starting backfill... This may take a while depending on how many messages exist.");
+            const result = await channelBackup.fetchHistorical(interaction.guild, targetChannel || undefined);
+            await interaction.editReply(result);
+            break;
+          }
+          case "purge": {
+            if (!guildId) break;
+            // Show confirmation modal
+            const modal = new ModalBuilder()
+              .setCustomId("backup_purge_confirm")
+              .setTitle("Confirm Purge")
+              .addComponents(
+                new ActionRowBuilder<TextInputBuilder>().addComponents(
+                  new TextInputBuilder()
+                    .setCustomId("purge_confirm")
+                    .setLabel(`Type "PURGE" to delete all backup data for this server`)
+                    .setStyle(TextInputStyle.Short)
+                    .setRequired(true)
+                    .setPlaceholder("PURGE")
+                )
+              );
+            await interaction.showModal(modal);
+            break;
+          }
+          case "export": {
+            const ch = options.getChannel("channel", true);
+            const { content, filename } = channelBackup.exportChannel(ch.id);
+            if (content.length > 2000) {
+              const buffer = Buffer.from(content, "utf-8");
+              await interaction.editReply({ content: `Backup for <#${ch.id}>:`, files: [{ attachment: buffer, name: filename }] });
+            } else {
+              await interaction.editReply(content);
+            }
+            break;
+          }
         }
         break;
       }
 
-      // ── Module 2: Members (per-guild) ──
+      // ── Restore ──
+      case "restore": {
+        await restoreModule.startRestoreFlow(interaction);
+        break;
+      }
+      case "restore-mappings": {
+        await interaction.editReply(restoreModule.listMappings(guildId));
+        break;
+      }
+      case "restore-clear": {
+        const result = restoreModule.clearMappings(guildId);
+        await interaction.editReply(result);
+        break;
+      }
+      case "restore-preview": {
+        const channelId = options.getString("channel-id", true);
+        const count = options.getInteger("count") || 10;
+        const result = await restoreModule.preview(channelId, count);
+        await interaction.editReply(result);
+        break;
+      }
+
+      // ── Members ──
       case "members-stats":
         await interaction.editReply(memberTracking.getStats(guildId));
         break;
 
-      // ── Module 3: Verification (per-guild) ──
+      // ── Verification ──
       case "verify-stats":
         await interaction.editReply(verification.getStats(guildId));
         break;
-
       case "verify-manual": {
         const user = options.getUser("user", true);
         const result = await verification.manualVerify(user.id, guildId);
@@ -211,7 +316,7 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
         await interaction.editReply(verification.getFlagged(guildId));
         break;
 
-      // ── Rules & Quiz Management (admin) ──
+      // ── Quiz Management ──
       case "post-verify":
         await handlePostVerifyCommand(interaction, client);
         break;
@@ -228,11 +333,11 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
         await handleQuizRemoveCommand(interaction, client);
         break;
 
-      // ── Module 5: Migration (global) ──
+      // ── Migration ──
       case "migrate-add": {
         const targetGuildId = options.getString("guild-id", true);
         const roleId = options.getString("role-id") || undefined;
-        await interaction.editReply("🚀 Starting migration...");
+        await interaction.editReply("Starting migration...");
         const result = await migrationModule.migrateAdd(targetGuildId, roleId);
         await interaction.editReply(result);
         break;
@@ -241,55 +346,13 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
         await interaction.editReply(migrationModule.getStatus());
         break;
 
-      // ── Module 4: Restore (per-guild) ──
-      case "restore-map": {
-        const source = options.getChannel("source", true);
-        const target = options.getChannel("target", true);
-        const mappings = loadChannelMappings(guildId);
-        mappings.push({ sourceChannelId: source.id, targetChannelId: target.id, isForum: false });
-        saveChannelMappings(guildId, mappings);
-        await interaction.editReply(`✅ Mapped <#${source.id}> → <#${target.id}>`);
-        break;
-      }
-      case "restore-unmap": {
-        const source = options.getChannel("source", true);
-        const mappings = loadChannelMappings(guildId).filter((m) => m.sourceChannelId !== source.id);
-        saveChannelMappings(guildId, mappings);
-        await interaction.editReply(`✅ Unmapped <#${source.id}>`);
-        break;
-      }
-      case "restore-list": {
-        const mappings = loadChannelMappings(guildId);
-        if (!mappings.length) {
-          await interaction.editReply("📋 No channel mappings");
-        } else {
-          const list = mappings.map((m) => `• <#${m.sourceChannelId}> → <#${m.targetChannelId}>${m.isForum ? " (forum)" : ""}`).join("\n");
-          await interaction.editReply(`📋 **Channel Mappings:**\n${list}`);
-        }
-        break;
-      }
-
-      case "restore-preview": {
-        const source = options.getChannel("source", true);
-        const result = await restoreModule.preview(source.id);
-        await interaction.editReply(result);
-        break;
-      }
-      case "restore-run": {
-        const source = options.getChannel("source", true);
-        await interaction.editReply("🔄 Restoring...");
-        const result = await restoreModule.restore(source.id);
-        await interaction.editReply(result);
-        break;
-      }
-
       default:
-        await interaction.editReply("❓ Unknown command");
+        await interaction.editReply("Unknown command");
     }
   } catch (err: any) {
     console.error("Command error:", err);
     try {
-      await interaction.editReply(`❌ Error: ${err.message}`);
+      await interaction.editReply(`Error: ${err.message}`);
     } catch {}
   }
 });
@@ -299,10 +362,10 @@ try {
   if (globalConfig.oauth2.clientSecret && globalConfig.oauth2.redirectUri) {
     await import("./oauth-callback.js");
   } else {
-    console.log("⚠️ OAuth2 not configured — authorization won't work. Set OAUTH2_CLIENT_SECRET and OAUTH2_REDIRECT_URI in .env");
+    console.log("OAuth2 not configured — set OAUTH2_CLIENT_SECRET and OAUTH2_REDIRECT_URI in .env");
   }
 } catch (e: any) {
-  console.log(`⚠️ OAuth2 callback server not started: ${e.message}`);
+  console.log(`OAuth2 callback server not started: ${e.message}`);
 }
 
 // ─── Login ───

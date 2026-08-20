@@ -6,14 +6,12 @@ const DB_PATH = resolve(import.meta.dir, "../data/bot.db");
 
 // Ensure data directory exists
 mkdirSync(resolve(import.meta.dir, "../data"), { recursive: true });
+mkdirSync(resolve(import.meta.dir, "../data/attachments"), { recursive: true });
 
 const db = new Database(DB_PATH, { create: true });
 db.exec("PRAGMA journal_mode = WAL");
 
-// --- Migration: Add guild_id to old tables (multi-server refactor) ---
-// Old databases were created before the per-guild refactor.
-// CREATE TABLE IF NOT EXISTS won't add new columns to existing tables.
-// We need to ALTER TABLE ADD COLUMN for each missing guild_id.
+// ─── Migration Helpers ───
 
 function migrateAddColumn(table: string, column: string, type: string, defaultValue: string = "''"): void {
   try {
@@ -30,28 +28,6 @@ function migrateAddColumn(table: string, column: string, type: string, defaultVa
   }
 }
 
-console.log("[Migration] Checking for missing columns...");
-
-// backup_channels: add guild_id
-migrateAddColumn("backup_channels", "guild_id", "TEXT");
-
-// messages: add guild_id
-migrateAddColumn("messages", "guild_id", "TEXT");
-
-// members: add guild_id
-migrateAddColumn("members", "guild_id", "TEXT");
-
-// verifications: add guild_id
-migrateAddColumn("verifications", "guild_id", "TEXT");
-
-// restore_runs: add guild_id
-migrateAddColumn("restore_runs", "guild_id", "TEXT");
-
-// channel_mappings: add guild_id
-migrateAddColumn("channel_mappings", "guild_id", "TEXT");
-
-// --- Drop old single-column unique indexes ---
-// Must check ALL indexes including auto-created ones (sqlite_autoindex_*)
 function dropSingleColumnUniqueIndexes(table: string): void {
   try {
     const idxs = db.prepare(`PRAGMA index_list(${table})`).all() as any[];
@@ -67,8 +43,95 @@ function dropSingleColumnUniqueIndexes(table: string): void {
   } catch {}
 }
 
+// --- Legacy migrations (multi-server refactor) ---
+console.log("[Migration] Checking for missing columns...");
+migrateAddColumn("backup_channels", "guild_id", "TEXT");
+migrateAddColumn("messages", "guild_id", "TEXT");
+migrateAddColumn("members", "guild_id", "TEXT");
+migrateAddColumn("verifications", "guild_id", "TEXT");
+migrateAddColumn("restore_runs", "guild_id", "TEXT");
+migrateAddColumn("channel_mappings", "guild_id", "TEXT");
+
 dropSingleColumnUniqueIndexes("members");
 dropSingleColumnUniqueIndexes("verifications");
+
+// ──────────────────────────────────────────────────────
+// BACKUP & RESTORE SYSTEM — Enhanced Schema
+// ──────────────────────────────────────────────────────
+
+// ─── backup_guilds (NEW) ───
+db.exec(`
+  CREATE TABLE IF NOT EXISTS backup_guilds (
+    guild_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL DEFAULT '',
+    icon_url TEXT DEFAULT '',
+    member_count INTEGER DEFAULT 0,
+    owner_id TEXT DEFAULT '',
+    first_backup_at TEXT,
+    last_backup_at TEXT,
+    backup_enabled INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+`);
+console.log("  [Backup] backup_guilds table ready");
+
+// ─── backup_channels (ENHANCED) ───
+db.exec(`
+  CREATE TABLE IF NOT EXISTS backup_channels (
+    channel_id TEXT PRIMARY KEY,
+    guild_id TEXT NOT NULL DEFAULT '',
+    channel_name TEXT NOT NULL,
+    added_at TEXT DEFAULT (datetime('now')),
+    type INTEGER DEFAULT 0,
+    topic TEXT DEFAULT '',
+    parent_id TEXT DEFAULT '',
+    position INTEGER DEFAULT 0,
+    nsfw INTEGER DEFAULT 0,
+    slowmode INTEGER DEFAULT 0,
+    message_count INTEGER DEFAULT 0
+  );
+`);
+// Add new columns to existing table if upgrading
+migrateAddColumn("backup_channels", "type", "INTEGER", "0");
+migrateAddColumn("backup_channels", "topic", "TEXT", "''");
+migrateAddColumn("backup_channels", "parent_id", "TEXT", "''");
+migrateAddColumn("backup_channels", "position", "INTEGER", "0");
+migrateAddColumn("backup_channels", "nsfw", "INTEGER", "0");
+migrateAddColumn("backup_channels", "slowmode", "INTEGER", "0");
+migrateAddColumn("backup_channels", "message_count", "INTEGER", "0");
+console.log("  [Backup] backup_channels table ready");
+
+// ─── messages (ENHANCED — now serves as backup_messages) ───
+// Already has: message_id, channel_id, guild_id, author_id, author_username, content,
+//   embeds_json, attachments_json, timestamp, edited_timestamp, is_deleted,
+//   reactions_json, is_thread_start, thread_id, reply_to_id, created_at
+// New columns:
+migrateAddColumn("messages", "author_bot", "INTEGER", "0");
+migrateAddColumn("messages", "is_pinned", "INTEGER", "0");
+console.log("  [Backup] messages table ready (enhanced)");
+
+// ─── Indexes for backup queries ───
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_backup_channels_guild ON backup_channels(guild_id);
+  CREATE INDEX IF NOT EXISTS idx_messages_guild ON messages(guild_id);
+  CREATE INDEX IF NOT EXISTS idx_messages_pinned ON messages(channel_id, is_pinned);
+  CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id);
+  CREATE INDEX IF NOT EXISTS idx_backup_guilds_enabled ON backup_guilds(backup_enabled);
+`);
+console.log("  [Backup] indexes ready");
+
+// ─── channel_mappings (ENHANCED for restore) ───
+// Already has: id, guild_id (target), source_channel_id, target_channel_id, is_forum, created_at
+// New columns:
+migrateAddColumn("channel_mappings", "source_guild_id", "TEXT", "''");
+migrateAddColumn("channel_mappings", "mapped_by", "TEXT", "''");
+migrateAddColumn("channel_mappings", "mapped_at", "TEXT", "datetime('now')");
+console.log("  [Backup] channel_mappings table ready (enhanced)");
+
+// ──────────────────────────────────────────────────────
+// OTHER MODULES (unchanged)
+// ──────────────────────────────────────────────────────
 
 // --- Per-Guild Config ---
 db.exec(`
@@ -87,15 +150,8 @@ db.exec(`
   );
 `);
 
-// --- Module 1: Channel Backup ---
+// --- Module 1: Messages table (already created above with enhanced columns) ---
 db.exec(`
-  CREATE TABLE IF NOT EXISTS backup_channels (
-    channel_id TEXT PRIMARY KEY,
-    guild_id TEXT NOT NULL DEFAULT '',
-    channel_name TEXT NOT NULL,
-    added_at TEXT DEFAULT (datetime('now'))
-  );
-
   CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     message_id TEXT UNIQUE NOT NULL,
@@ -113,13 +169,17 @@ db.exec(`
     is_thread_start INTEGER DEFAULT 0,
     thread_id TEXT,
     reply_to_id TEXT,
+    author_bot INTEGER DEFAULT 0,
+    is_pinned INTEGER DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now'))
   );
 
   CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel_id);
   CREATE INDEX IF NOT EXISTS idx_messages_author ON messages(author_id);
-  CREATE INDEX IF NOT EXISTS idx_messages_guild ON messages(guild_id);
+`);
 
+// --- Edit history ---
+db.exec(`
   CREATE TABLE IF NOT EXISTS edit_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     message_id TEXT NOT NULL,
@@ -185,11 +245,14 @@ db.exec(`
     source_channel_id TEXT NOT NULL,
     target_channel_id TEXT NOT NULL,
     is_forum INTEGER DEFAULT 0,
+    source_guild_id TEXT DEFAULT '',
+    mapped_by TEXT DEFAULT '',
+    mapped_at TEXT DEFAULT (datetime('now')),
     created_at TEXT DEFAULT (datetime('now'))
   );
 `);
 
-// --- Module 5: OAuth2 Tokens (global --- one per user, works across all guilds) ---
+// --- Module 5: OAuth2 Tokens (global) ---
 db.exec(`
   CREATE TABLE IF NOT EXISTS oauth_tokens (
     user_id TEXT PRIMARY KEY,
