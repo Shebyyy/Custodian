@@ -1,7 +1,7 @@
 // @ts-nocheck — bun runs fine with these discord.js types
 import {
   Client, Events, Message, PartialMessage, ThreadChannel, Guild, TextBasedChannel,
-  ChannelType, Embed, Attachment, MessagePin, Collection,
+  ChannelType, Embed, EmbedBuilder, Attachment, MessagePin, Collection,
 } from "discord.js";
 import { getDb } from "../db.js";
 import { sleep } from "../utils.js";
@@ -79,7 +79,6 @@ export class ChannelBackupModule {
     const textChannels = channels.filter((c) => c.type === ChannelType.GuildText || c.type === 0);
     const announcementChannels = channels.filter((c) => c.type === ChannelType.GuildAnnouncement || c.type === 5);
 
-    const { EmbedBuilder } = require('discord.js');
     const embed = new EmbedBuilder()
       .setTitle(`Backup Status — ${guild.name}`)
       .setColor(guild.backup_enabled ? 0x57F287 : 0xED4245)
