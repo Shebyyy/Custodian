@@ -398,7 +398,7 @@ export class VerificationModule {
   /**
    * Start a new quiz session for a user.
    * Sends the first question as an ephemeral embed, then reveals the
-   * answer button(s) on the same message after 5 seconds.
+   * answer button(s) on the same message after a short delay.
    */
   private async startQuiz(interaction: any, guildId: string, userId: string) {
     const config = getGuildConfig(guildId);
@@ -428,11 +428,16 @@ export class VerificationModule {
         embeds: [this.buildQuestionEmbed(session)],
         flags: MessageFlags.Ephemeral,
       });
-      setTimeout(() => this.addAnswerButtons(session), 5000);
+      setTimeout(() => this.addAnswerButtons(session), this.answerDelay(session));
     } catch (err) {
       console.error("Failed to start quiz:", err);
       quizSessions.delete(key);
     }
+  }
+
+  /** Reveal delay for the current question (the fixed question gets longer). */
+  private answerDelay(session: QuizSession): number {
+    return session.items[session.currentIndex].isFixed ? 10000 : 5000;
   }
 
   /** Build the ephemeral embed shown for the current question. */
@@ -441,20 +446,22 @@ export class VerificationModule {
     const embed = new EmbedBuilder()
       .setColor(1564442)
       .setTitle(`❓ Question ${session.currentIndex + 1} of ${session.items.length}`)
-      .setDescription(`# ${item.question}`)
       .setThumbnail("https://github.com/RyanYuuki/AnymeX/raw/main/assets/images/logo.png");
 
+    let desc = "";
     if (item.isFixed) {
-      embed.addFields({ name: "How to answer", value: "Click the **Answer** button and type the exact phrase." });
+      // Don't leak the answer in the question header — strip it out of the question text
+      const question = item.question.replace(item.correctAnswer, "").replace(/\s*Type:\s*$/i, "").trim();
+      desc = `# ${question}\n\n## Click the **Answer** button and type the "${item.correctAnswer}" exact phrase.`;
     } else if (item.type === "yes_no") {
-      embed.addFields({ name: "How to answer", value: "Use the **Yes / No** buttons below." });
+      desc = `# ${item.question}\n\n## Use the **Yes / No** buttons below.`;
     } else {
       const options = item.options.map((o, i) => `${String.fromCharCode(65 + i)}. **${o}**`).join("\n");
-      embed.addFields({ name: "Options", value: options });
-      embed.addFields({ name: "How to answer", value: "Click the **Answer** button and type the letter, number, or option text." });
+      desc = `# ${item.question}\n\n### Options\n${options}\n\n## Click the **Answer** button and type the letter, number, or option text.`;
     }
 
-    embed.setFooter({ text: "The answer button will appear in 5 seconds..." });
+    embed.setDescription(desc);
+    embed.setFooter({ text: `The answer button will appear in ${item.isFixed ? 10 : 5} seconds...` });
     return embed;
   }
 
@@ -507,7 +514,7 @@ export class VerificationModule {
         quizSessions.delete(key);
         return;
       }
-      setTimeout(() => this.addAnswerButtons(session), 5000);
+      setTimeout(() => this.addAnswerButtons(session), this.answerDelay(session));
     } else {
       await this.finishQuiz(session);
     }
