@@ -67,10 +67,10 @@ export class ChannelBackupModule {
 
   // ─── Status & Stats ───
 
-  getStatus(guildId: string): string {
+  getStatusEmbed(guildId: string): any {
     const db = getDb();
     const guild = db.prepare("SELECT * FROM backup_guilds WHERE guild_id = ?").get(guildId) as any;
-    if (!guild) return "Backup is not configured for this server.";
+    if (!guild) return { content: "Backup is not configured for this server." };
 
     const channels = db.prepare("SELECT * FROM backup_channels WHERE guild_id = ? ORDER BY position").all(guildId) as any[];
     const totalMessages = db.prepare("SELECT COUNT(*) as cnt FROM messages WHERE guild_id = ? AND is_deleted = 0").get(guildId) as any;
@@ -79,23 +79,54 @@ export class ChannelBackupModule {
     const textChannels = channels.filter((c) => c.type === ChannelType.GuildText || c.type === 0);
     const announcementChannels = channels.filter((c) => c.type === ChannelType.GuildAnnouncement || c.type === 5);
 
-    let status = `**Backup Status for ${guild.name}**\n`;
-    status += `State: ${guild.backup_enabled ? "Active" : "Disabled"}\n`;
-    status += `First backup: ${guild.first_backup_at || "N/A"}\n`;
-    status += `Last backup: ${guild.last_backup_at || "N/A"}\n`;
-    status += `\n**Channels:** ${channels.length} total (${textChannels.length} text, ${announcementChannels.length} announcement, ${threads.length} threads)\n`;
-    status += `**Messages:** ${totalMessages?.cnt || 0} backed up (${deletedMessages?.cnt || 0} deleted)\n`;
+    const { EmbedBuilder } = require('discord.js');
+    const embed = new EmbedBuilder()
+      .setTitle(`Backup Status — ${guild.name}`)
+      .setColor(guild.backup_enabled ? 0x57F287 : 0xED4245)
+      .addFields(
+        { name: "State", value: guild.backup_enabled ? "Active" : "Disabled", inline: true },
+        { name: "Total Messages", value: `${totalMessages?.cnt || 0}`, inline: true },
+        { name: "Deleted", value: `${deletedMessages?.cnt || 0}`, inline: true },
+        { name: "Channels", value: `${channels.length} total (${textChannels.length} text, ${announcementChannels.length} announcement, ${threads.length} threads)`, inline: true },
+        { name: "First Backup", value: this.formatDate(guild.first_backup_at), inline: true },
+        { name: "Last Backup", value: this.formatDate(guild.last_backup_at), inline: true },
+      );
 
-    if (channels.length > 0) {
-      status += `\n**Channel Breakdown:**\n`;
-      for (const ch of channels) {
-        const count = db.prepare("SELECT COUNT(*) as cnt FROM messages WHERE channel_id = ? AND is_deleted = 0").get(ch.channel_id) as any;
-        const typeLabel = this.channelTypeLabel(ch.type);
-        status += `  #${ch.channel_name} — ${count?.cnt || 0} messages [${typeLabel}]\n`;
-      }
+    // Add channel breakdown as fields (max 25 fields = 25 channels)
+    const maxChannels = 20; // leave room for the 6 summary fields above
+    const shownChannels = channels.slice(0, maxChannels);
+    for (const ch of shownChannels) {
+      const count = db.prepare("SELECT COUNT(*) as cnt FROM messages WHERE channel_id = ? AND is_deleted = 0").get(ch.channel_id) as any;
+      const typeLabel = this.channelTypeLabel(ch.type);
+      embed.addFields({
+        name: `#${ch.channel_name}`,
+        value: `${count?.cnt || 0} messages [${typeLabel}]`,
+        inline: true,
+      });
     }
 
-    return status;
+    if (channels.length > maxChannels) {
+      embed.addFields({ name: "...", value: `+ ${channels.length - maxChannels} more channels`, inline: false });
+    }
+
+    if (channels.length > maxChannels) {
+      const csv = 'Channel,Messages,Type\n' + channels.map((ch) => {
+        const count = db.prepare('SELECT COUNT(*) as cnt FROM messages WHERE channel_id = ? AND is_deleted = 0').get(ch.channel_id) as any;
+        return ch.channel_name + ',' + (count?.cnt || 0) + ',' + this.channelTypeLabel(ch.type);
+      }).join('\n');
+      return {
+        embeds: [embed],
+        files: [{ attachment: Buffer.from(csv, 'utf-8'), name: 'backup-status-' + guildId + '.csv' }],
+      };
+    }
+
+
+    return { embeds: [embed] };
+  }
+
+  private formatDate(iso: string | null): string {
+    if (!iso) return "N/A";
+    try { return new Date(iso).toLocaleDateString(); } catch { return "unknown"; }
   }
 
   // ─── Historical Backfill ───

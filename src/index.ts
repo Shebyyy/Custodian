@@ -230,7 +230,8 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
             break;
           }
           case "status": {
-            await interaction.editReply(channelBackup.getStatus(guildId));
+            const payload = channelBackup.getStatusEmbed(guildId);
+            await interaction.editReply(payload);
             break;
           }
           case "fetch": {
