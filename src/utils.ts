@@ -274,7 +274,7 @@ export async function editEphemeralMessage(
   embeds?: any[],
 ): Promise<boolean> {
   const body: any = { content, components: components || [] };
-  if (embeds && embeds.length) body.embeds = embeds;
+  if (embeds !== undefined) body.embeds = embeds;
 
   const res = await fetch(
     `${DISCORD_API}/webhooks/${applicationId}/${interactionToken}/messages/@original`,

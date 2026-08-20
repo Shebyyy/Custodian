@@ -8,20 +8,27 @@ import { getDb } from "../db.js";
 import { getGuildConfig, GuildConfig, QuizQuestion, FinalQuestion } from "../config.js";
 import {
   clearPendingAuthInteraction, editEphemeralMessage, getOAuth2Url, getPendingAuthInteraction,
-  hasValidToken, storePendingAuthInteraction, truncate,
+  hasValidToken, storePendingAuthInteraction,
 } from "../utils.js";
 
 /**
  * Module 3 — Verification + Quiz Gate (Shared Panel, Multi-Server)
  *
- * Quiz: 4 random MCQs from pool + 1 fixed question, shuffled, all 5 in modal.
+ * Quiz: questions are asked ONE AT A TIME as ephemeral embeds.
+ * Each question is shown immediately, then after 5 seconds the answer
+ * button(s) appear on the same message:
+ *   - Yes/No questions → a Yes / No button pair
+ *   - Everything else  → an "Answer" button that opens a modal
+ * Once answered it automatically moves on to the next question.
  * All answers must be correct (exact match, case-insensitive).
  *
  * Flow:
  * 1. Admin posts rules, runs /post-verify
  * 2. Member joins → Unverified role assigned + logged (embed)
- * 3. User clicks Verify Me → quiz modal (5 questions)
- * 4. Pass (5/5) → Verified role, Fail → retry
+ * 3. User clicks Verify Me → first question (ephemeral embed)
+ * 4. After 5s an answer button appears → user answers
+ * 5. Auto-advances to the next question until done
+ * 6. Pass (all correct) → Verified role, Fail → retry
  */
 
 interface QuizItem {
@@ -30,7 +37,23 @@ interface QuizItem {
   options: string[];
   correctAnswer: string;
   isFixed: boolean;
+  type?: "yes_no" | "multiple_choice";
 }
+
+/** In-memory state for a user's active (in-progress) quiz session. */
+interface QuizSession {
+  userId: string;
+  guildId: string;
+  username: string;
+  items: QuizItem[];
+  currentIndex: number;
+  answers: Record<number, string>;
+  applicationId: string;
+  token: string;
+}
+
+const quizSessions = new Map<string, QuizSession>();
+const sessionKey = (userId: string, guildId: string) => `${userId}:${guildId}`;
 
 function shuffleArray<T>(arr: T[]): T[] {
   const a = [...arr];
@@ -212,7 +235,7 @@ export class VerificationModule {
       db.prepare("UPDATE verifications SET agreed_to_rules_at = datetime('now'), quiz_started_at = datetime('now'), status = 'in_progress' WHERE user_id = ? AND guild_id = ?")
         .run(userId, guildId);
 
-      await this.sendQuizModal(interaction, guildId);
+      await this.startQuiz(interaction, guildId, userId);
     });
 
     // ── Handle "Authorize Bot" button (captures interaction for post-auth prompt) ──
@@ -247,27 +270,94 @@ export class VerificationModule {
       }
     });
 
-    // ── Handle quiz modal submissions ──
+    // ── Handle Yes/No answer buttons ──
     this.client.on(Events.InteractionCreate, async (interaction: Interaction) => {
-      if (!interaction.isModalSubmit()) return;
-      if (!interaction.customId.startsWith("quiz_all_")) return;
+      if (!interaction.isButton()) return;
+      if (!interaction.customId.startsWith("quiz_yes:") && !interaction.customId.startsWith("quiz_no:")) return;
 
-      const parts = interaction.customId.split("_");
-      const userId = parts[2];
-      const guildId = parts[3];
-      // parts[4] contains comma-separated slotIds that were in the modal
-      const slotIds = parts[4] ? parts[4].split(",").map(Number) : [];
+      const [action, guildId, userId, indexStr] = interaction.customId.split(":");
+      const key = sessionKey(interaction.user.id, guildId);
+      const session = quizSessions.get(key);
 
-      const answers: Record<number, string> = {};
-      for (const slotId of slotIds) {
-        const fieldId = slotId === 100 ? "q_fixed" : `q_${slotId}`;
-        answers[slotId] = interaction.fields.getTextInputValue(fieldId).trim();
+      if (!session || session.currentIndex !== Number(indexStr)) {
+        await interaction.reply({
+          content: "This quiz question is no longer active. Click **Verify Me** in the verification channel to start a new quiz.",
+          flags: MessageFlags.Ephemeral,
+        }).catch(() => {});
+        return;
       }
 
-      console.log(`[Quiz] User ${userId} answers:`, JSON.stringify(answers));
+      const item = session.items[session.currentIndex];
+      session.answers[item.slotId] = action === "quiz_yes" ? "Yes" : "No";
 
-      await interaction.reply({ content: "All answers submitted! Grading...", flags: MessageFlags.Ephemeral });
-      setTimeout(() => this.grade(userId, guildId, interaction, answers), 500);
+      await interaction.deferUpdate().catch(() => {});
+      await this.advance(session);
+    });
+
+    // ── Handle "Answer" button (opens modal for free-text / MCQ answers) ──
+    this.client.on(Events.InteractionCreate, async (interaction: Interaction) => {
+      if (!interaction.isButton()) return;
+      if (!interaction.customId.startsWith("quiz_answer:")) return;
+
+      const [, guildId, userId, indexStr] = interaction.customId.split(":");
+      const key = sessionKey(interaction.user.id, guildId);
+      const session = quizSessions.get(key);
+
+      if (!session || session.currentIndex !== Number(indexStr)) {
+        await interaction.reply({
+          content: "This quiz question is no longer active. Click **Verify Me** in the verification channel to start a new quiz.",
+          flags: MessageFlags.Ephemeral,
+        }).catch(() => {});
+        return;
+      }
+
+      const item = session.items[session.currentIndex];
+      const input = new TextInputBuilder()
+        .setCustomId("answer")
+        .setLabel(item.isFixed ? "Type the exact phrase" : "Your answer (letter, number, or text)")
+        .setStyle(item.isFixed ? TextInputStyle.Paragraph : TextInputStyle.Short)
+        .setPlaceholder(
+          item.isFixed
+            ? `Type: ${item.correctAnswer}`
+            : item.options.map((o, i) => `${String.fromCharCode(65 + i)}. ${o}`).join(" | ")
+        )
+        .setRequired(true)
+        .setMaxLength(item.isFixed ? 300 : 100);
+
+      const modal = new ModalBuilder()
+        .setCustomId(`quiz_modal:${guildId}:${userId}:${indexStr}`)
+        .setTitle(`Question ${session.currentIndex + 1}`)
+        .addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(input));
+
+      try {
+        await interaction.showModal(modal);
+      } catch (err) {
+        console.error("Failed to show answer modal:", err);
+      }
+    });
+
+    // ── Handle quiz answer modal submissions ──
+    this.client.on(Events.InteractionCreate, async (interaction: Interaction) => {
+      if (!interaction.isModalSubmit()) return;
+      if (!interaction.customId.startsWith("quiz_modal:")) return;
+
+      const [, guildId, userId, indexStr] = interaction.customId.split(":");
+      const key = sessionKey(interaction.user.id, guildId);
+      const session = quizSessions.get(key);
+
+      if (!session || session.currentIndex !== Number(indexStr)) {
+        await interaction.reply({
+          content: "This quiz question is no longer active. Click **Verify Me** in the verification channel to start a new quiz.",
+          flags: MessageFlags.Ephemeral,
+        }).catch(() => {});
+        return;
+      }
+
+      const item = session.items[session.currentIndex];
+      session.answers[item.slotId] = interaction.fields.getTextInputValue("answer").trim();
+
+      await interaction.deferUpdate().catch(() => {});
+      await this.advance(session);
     });
   }
 
@@ -287,6 +377,7 @@ export class VerificationModule {
         options: q.options,
         correctAnswer: q.correctAnswer,
         isFixed: false,
+        type: q.type,
       });
     });
 
@@ -304,56 +395,141 @@ export class VerificationModule {
     return shuffleArray(items);
   }
 
-  private async sendQuizModal(interaction: any, guildId: string) {
+  /**
+   * Start a new quiz session for a user.
+   * Sends the first question as an ephemeral embed, then reveals the
+   * answer button(s) on the same message after 5 seconds.
+   */
+  private async startQuiz(interaction: any, guildId: string, userId: string) {
     const config = getGuildConfig(guildId);
     const items = this.buildQuizItems(config);
-
     if (!items.length) return;
 
-    const actionRows = items.map((item) => {
-      const label = item.isFixed ? "Fixed Question — type exactly" : `Q: ${truncate(item.question, 35)}`;
-      const placeholder = item.isFixed
-        ? `Type: ${item.correctAnswer}`
-        : item.options.map((o, i) => `${String.fromCharCode(65 + i)}. ${o}`).join(" | ");
+    const session: QuizSession = {
+      userId,
+      guildId,
+      username: interaction.user?.username || userId,
+      items,
+      currentIndex: 0,
+      answers: {},
+      applicationId: interaction.applicationId,
+      token: interaction.token,
+    };
+    const key = sessionKey(userId, guildId);
+    quizSessions.set(key, session);
 
-      return new ActionRowBuilder<TextInputBuilder>().addComponents(
-        new TextInputBuilder()
-          .setCustomId(item.isFixed ? "q_fixed" : `q_${item.slotId}`)
-          .setLabel(label)
-          .setStyle(item.isFixed ? TextInputStyle.Paragraph : TextInputStyle.Short)
-          .setPlaceholder(placeholder)
-          .setRequired(true)
-          .setMaxLength(item.isFixed ? 300 : 100)
-      );
-    });
-
-    // Encode selected slotIds in modal customId so grading knows exactly which questions to check
-    const slotIdsStr = items.map((item) => item.slotId).join(",");
-    const modal = new ModalBuilder()
-      .setCustomId(`quiz_all_${interaction.user.id}_${guildId}_${slotIdsStr}`)
-      .setTitle(`Verification Quiz (${items.length} questions)`)
-      .addComponents(...actionRows);
+    // Clean up abandoned sessions (ephemeral messages expire after ~15 min)
+    setTimeout(() => {
+      if (quizSessions.get(key) === session) quizSessions.delete(key);
+    }, 15 * 60 * 1000);
 
     try {
-      await interaction.showModal(modal);
+      await interaction.reply({
+        embeds: [this.buildQuestionEmbed(session)],
+        flags: MessageFlags.Ephemeral,
+      });
+      setTimeout(() => this.addAnswerButtons(session), 5000);
     } catch (err) {
-      console.error("Failed to show modal:", err);
+      console.error("Failed to start quiz:", err);
+      quizSessions.delete(key);
     }
   }
 
-  private async grade(userId: string, guildId: string, interaction: any, answers: Record<number, string>) {
+  /** Build the ephemeral embed shown for the current question. */
+  private buildQuestionEmbed(session: QuizSession): EmbedBuilder {
+    const item = session.items[session.currentIndex];
+    const embed = new EmbedBuilder()
+      .setColor(1564442)
+      .setTitle(`❓ Question ${session.currentIndex + 1} of ${session.items.length}`)
+      .setDescription(`# ${item.question}`)
+      .setThumbnail("https://github.com/RyanYuuki/AnymeX/raw/main/assets/images/logo.png");
+
+    if (item.isFixed) {
+      embed.addFields({ name: "How to answer", value: "Click the **Answer** button and type the exact phrase." });
+    } else if (item.type === "yes_no") {
+      embed.addFields({ name: "How to answer", value: "Use the **Yes / No** buttons below." });
+    } else {
+      const options = item.options.map((o, i) => `${String.fromCharCode(65 + i)}. **${o}**`).join("\n");
+      embed.addFields({ name: "Options", value: options });
+      embed.addFields({ name: "How to answer", value: "Click the **Answer** button and type the letter, number, or option text." });
+    }
+
+    embed.setFooter({ text: "The answer button will appear in 5 seconds..." });
+    return embed;
+  }
+
+  /** Add the answer button(s) for the current question (called after 5s). */
+  private async addAnswerButtons(session: QuizSession) {
+    const key = sessionKey(session.userId, session.guildId);
+    if (quizSessions.get(key) !== session) return;
+
+    const item = session.items[session.currentIndex];
+    const components: ActionRowBuilder<ButtonBuilder>[] = [];
+
+    if (item.type === "yes_no") {
+      components.push(new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`quiz_yes:${session.guildId}:${session.userId}:${session.currentIndex}`)
+          .setLabel("Yes")
+          .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+          .setCustomId(`quiz_no:${session.guildId}:${session.userId}:${session.currentIndex}`)
+          .setLabel("No")
+          .setStyle(ButtonStyle.Danger),
+      ));
+    } else {
+      components.push(new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`quiz_answer:${session.guildId}:${session.userId}:${session.currentIndex}`)
+          .setLabel("✏️ Answer")
+          .setStyle(ButtonStyle.Primary),
+      ));
+    }
+
+    const ok = await editEphemeralMessage(session.applicationId, session.token, "", components, [this.buildQuestionEmbed(session)]);
+    if (!ok) {
+      console.warn(`[Quiz] Could not reveal answer buttons for ${session.userId} (message may have expired).`);
+      quizSessions.delete(key);
+    }
+  }
+
+  /** Recorded an answer — move to the next question or finish the quiz. */
+  private async advance(session: QuizSession) {
+    const key = sessionKey(session.userId, session.guildId);
+    if (quizSessions.get(key) !== session) return;
+
+    const next = session.currentIndex + 1;
+    if (next < session.items.length) {
+      session.currentIndex = next;
+      const ok = await editEphemeralMessage(session.applicationId, session.token, "", [], [this.buildQuestionEmbed(session)]);
+      if (!ok) {
+        console.warn(`[Quiz] Could not advance question for ${session.userId}.`);
+        quizSessions.delete(key);
+        return;
+      }
+      setTimeout(() => this.addAnswerButtons(session), 5000);
+    } else {
+      await this.finishQuiz(session);
+    }
+  }
+
+  /** All questions answered — grade the quiz, apply roles, update the message. */
+  private async finishQuiz(session: QuizSession) {
+    const key = sessionKey(session.userId, session.guildId);
+    quizSessions.delete(key);
+
+    const { userId, guildId, items, answers, username } = session;
     const config = getGuildConfig(guildId);
     const db = getDb();
+
     let correct = 0;
     const wrongQuestions: string[] = [];
-    const total = Object.keys(answers).length;
+    const total = items.length;
 
-    // Check only the questions that were in the modal (by slotId from answers keys)
-    for (const slotIdStr of Object.keys(answers)) {
-      const slotId = Number(slotIdStr);
-      const userAns = (answers[slotId] || "").trim().toLowerCase();
+    for (const item of items) {
+      const userAns = (answers[item.slotId] || "").trim().toLowerCase();
 
-      if (slotId === 100 && config.quiz.finalQuestion) {
+      if (item.isFixed && config.quiz.finalQuestion) {
         // Fixed question: exact match (case-insensitive, trimmed)
         const expected = config.quiz.finalQuestion.expectedAnswer.trim().toLowerCase();
         if (userAns === expected) {
@@ -361,13 +537,13 @@ export class VerificationModule {
         } else {
           wrongQuestions.push(
             `**${config.quiz.finalQuestion.question}**\n` +
-            `Their answer: **${answers[slotId] || "(empty)"}**\n` +
+            `Their answer: **${answers[item.slotId] || "(empty)"}**\n` +
             `Correct answer: **${config.quiz.finalQuestion.expectedAnswer}**`
           );
         }
       } else {
         // MCQ from pool
-        const q = config.quiz.questions.find((q) => q.id === slotId);
+        const q = config.quiz.questions.find((qq) => qq.id === item.slotId);
         if (!q) continue;
         const correctIdx = q.options.findIndex((o) => o.toLowerCase() === q.correctAnswer.toLowerCase());
         if (
@@ -380,7 +556,7 @@ export class VerificationModule {
           const correctLetter = String.fromCharCode(65 + correctIdx);
           wrongQuestions.push(
             `**${q.question}**\n` +
-            `Their answer: **${answers[slotId] || "(empty)"}**\n` +
+            `Their answer: **${answers[item.slotId] || "(empty)"}**\n` +
             `Correct answer: **${correctLetter}. ${q.correctAnswer}**`
           );
         }
@@ -390,7 +566,6 @@ export class VerificationModule {
     const passed = correct === total; // all must be correct
     const record = db.prepare("SELECT attempts FROM verifications WHERE user_id = ? AND guild_id = ?").get(userId, guildId) as any;
     const newAttempts = (record?.attempts || 0) + 1;
-    const username = interaction.user?.username || userId;
 
     try {
       if (passed) {
@@ -415,15 +590,17 @@ export class VerificationModule {
             .setTimestamp()
         );
 
-        await interaction.followUp({ content: `**Passed!** ${correct}/${total} — All correct! You now have full access.`, flags: MessageFlags.Ephemeral });
+        await editEphemeralMessage(session.applicationId, session.token,
+          `**Passed!** ${correct}/${total} — All correct! You now have full access.`,
+          [], []);
       } else {
         db.prepare("UPDATE verifications SET status = 'failed', attempts = ?, score = ?, answers_json = ? WHERE user_id = ? AND guild_id = ?")
           .run(newAttempts, correct, JSON.stringify(answers), userId, guildId);
 
         const remaining = config.quiz.maxAttempts - newAttempts;
+        const wrongField = wrongQuestions.length > 0 ? wrongQuestions.join("\n\n") : "None";
 
         if (remaining > 0) {
-          const wrongField = wrongQuestions.length > 0 ? wrongQuestions.join("\n\n") : "None";
           await this.sendLog(guildId,
             new EmbedBuilder()
               .setColor(Colors.Red)
@@ -437,14 +614,12 @@ export class VerificationModule {
               .addFields({ name: "Wrong Answers", value: wrongField })
               .setTimestamp()
           );
-          await interaction.followUp({
-            content: `**Failed** — ${correct}/${total}. All answers must be correct.\n${remaining} attempt${remaining > 1 ? "s" : ""} remaining.`,
-            flags: MessageFlags.Ephemeral,
-          });
+          await editEphemeralMessage(session.applicationId, session.token,
+            `**Failed** — ${correct}/${total}. All answers must be correct.\n${remaining} attempt${remaining > 1 ? "s" : ""} remaining.`,
+            [], []);
         } else {
           db.prepare("UPDATE verifications SET status = 'flagged_review' WHERE user_id = ? AND guild_id = ?").run(userId, guildId);
 
-          const wrongField = wrongQuestions.length > 0 ? wrongQuestions.join("\n\n") : "None";
           await this.sendLog(guildId,
             new EmbedBuilder()
               .setColor(Colors.Orange)
@@ -457,7 +632,9 @@ export class VerificationModule {
               .addFields({ name: "Wrong Answers", value: wrongField })
               .setTimestamp()
           );
-          await interaction.followUp({ content: "Max attempts reached. An admin will review your case.", flags: MessageFlags.Ephemeral });
+          await editEphemeralMessage(session.applicationId, session.token,
+            "Max attempts reached. An admin will review your case.",
+            [], []);
         }
       }
     } catch (err) {
