@@ -126,7 +126,7 @@ console.log("  [Backup] indexes ready");
 // New columns:
 migrateAddColumn("channel_mappings", "source_guild_id", "TEXT", "''");
 migrateAddColumn("channel_mappings", "mapped_by", "TEXT", "''");
-migrateAddColumn("channel_mappings", "mapped_at", "TEXT", "datetime('now')");
+migrateAddColumn("channel_mappings", "mapped_at", "TEXT", "''");
 console.log("  [Backup] channel_mappings table ready (enhanced)");
 
 // ──────────────────────────────────────────────────────
