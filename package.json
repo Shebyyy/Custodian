@@ -9,7 +9,8 @@
     "db:setup": "bun src/db-setup.ts"
   },
   "dependencies": {
-    "discord.js": "^14.16.3"
+    "discord.js": "^14.16.3",
+    "ssh2": "^1.17.0"
   },
   "devDependencies": {
     "@types/bun": "^1.1.14",

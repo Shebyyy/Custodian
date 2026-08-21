@@ -37,34 +37,14 @@ jobs:
             # Clone or pull
             echo "[2/6] Fetching code..."
 
-            # Save old PID BEFORE git clean wipes it
-            OLD_BOT_PID=""
-            if [ -f /root/Custodian/data/bot.pid ]; then
-              OLD_BOT_PID=$(cat /root/Custodian/data/bot.pid)
-            fi
-
             if [ -d /root/Custodian/.git ]; then
               cd /root/Custodian
               git fetch origin main
-              git clean -fd --exclude=data
+              git clean -fd --exclude=data --exclude=data/bot.log --exclude=data/bot.pid --exclude=data/bot.db --exclude=data/attachments
               git reset --hard origin/main
             else
               rm -rf /root/Custodian
               git clone -b main https://github.com/${{ github.repository }}.git /root/Custodian
-            fi
-
-            # Kill old process using saved PID (if it's still alive)
-            if [ -n "$OLD_BOT_PID" ] && kill -0 "$OLD_BOT_PID" 2>/dev/null; then
-              kill -9 "$OLD_BOT_PID" 2>/dev/null || true
-              echo "Stopped old process (PID: $OLD_BOT_PID)"
-              sleep 2
-            fi
-
-            # Safety net: kill anything still holding port 4000 (OAuth callback)
-            if command -v fuser &>/dev/null; then
-              fuser -k 4000/tcp 2>/dev/null || true
-            elif command -v lsof &>/dev/null; then
-              lsof -ti:4000 | xargs kill -9 2>/dev/null || true
             fi
 
             echo "OK: code fetched"
@@ -98,29 +78,18 @@ jobs:
             bun run db:setup
             echo "OK: database ready"
 
-            # Kill old bot using PID file (safe — won't match script itself)
-            echo "[6/6] Restarting bot..."
-            if [ -f /root/Custodian/data/bot.pid ]; then
-              OLD_PID=$(cat /root/Custodian/data/bot.pid)
-              if kill -0 "$OLD_PID" 2>/dev/null; then
-                kill -9 "$OLD_PID" 2>/dev/null || true
-                echo "Stopped old process (PID: $OLD_PID)"
-              fi
-              rm -f /root/Custodian/data/bot.pid
-            else
-              echo "No PID file found — skipping kill"
-            fi
-            sleep 2
-
-            # Start
-            setsid bun run /root/Custodian/src/index.ts > /root/Custodian/data/bot.log 2>&1 &
-            echo $! > /root/Custodian/data/bot.pid
+            # Start bot
+            echo "[6/6] Starting bot..."
+            rm -f /root/Custodian/data/bot.pid
+            nohup bun run /root/Custodian/src/index.ts > /root/Custodian/data/bot.log 2>&1 &
+            BOT_PID=$!
+            echo "$BOT_PID" > /root/Custodian/data/bot.pid
             sleep 5
 
             # Health check
             echo "Health check..."
-            if kill -0 $(cat /root/Custodian/data/bot.pid) 2>/dev/null; then
-              echo "✅ Custodian is running (PID: $(cat /root/Custodian/data/bot.pid))"
+            if kill -0 "$BOT_PID" 2>/dev/null; then
+              echo "✅ Custodian is running (PID: $BOT_PID)"
             else
               echo "❌ Custodian failed to start!"
               cat /root/Custodian/data/bot.log

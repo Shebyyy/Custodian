@@ -10,6 +10,7 @@ mkdirSync(resolve(import.meta.dir, "../data/attachments"), { recursive: true });
 
 const db = new Database(DB_PATH, { create: true });
 db.exec("PRAGMA journal_mode = WAL");
+db.exec("PRAGMA busy_timeout = 5000");
 
 // ─── Migration Helpers ───
 
