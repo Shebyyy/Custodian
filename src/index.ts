@@ -204,6 +204,7 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
     && commandName !== "post-verify"
     && commandName !== "quiz-add"
     && commandName !== "set-final-question"
+    && commandName !== "quiz-toggle"
     && !(commandName === "backup" && subcommand === "purge");
   if (needsDefer) {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
