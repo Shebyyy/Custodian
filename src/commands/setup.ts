@@ -60,6 +60,7 @@ export async function handleSetupCommand(interaction: CommandInteraction, client
       maxAttempts,
       questions: existingConfig.quiz.questions,
       finalQuestion: existingConfig.quiz.finalQuestion,
+      enabled: existingConfig.quiz.enabled,
     },
     termsAndConditions: existingConfig.termsAndConditions,
   });

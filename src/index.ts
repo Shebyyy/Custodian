@@ -18,6 +18,7 @@ import {
   getQuizAddCommand, handleQuizAddCommand,
   getQuizListCommand, handleQuizListCommand,
   getQuizRemoveCommand, handleQuizRemoveCommand,
+  getQuizToggleCommand, handleQuizToggleCommand,
   handleManagementModal,
 } from "./commands/quiz-management.js";
 
@@ -100,6 +101,7 @@ const commands = [
   getQuizAddCommand(),
   getQuizListCommand(),
   getQuizRemoveCommand(),
+  getQuizToggleCommand(),
 
   // ── Migration Commands ──
   new SlashCommandBuilder().setName("migrate-add").setDescription("Add authorized users to a server directly")
@@ -332,6 +334,9 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
         break;
       case "quiz-remove":
         await handleQuizRemoveCommand(interaction, client);
+        break;
+      case "quiz-toggle":
+        await handleQuizToggleCommand(interaction);
         break;
 
       // ── Migration ──

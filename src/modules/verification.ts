@@ -227,6 +227,37 @@ export class VerificationModule {
         return;
       }
 
+      if (!config.quiz.enabled) {
+        // Quiz disabled — verify directly after auth
+        const username = interaction.user.username;
+        const db2 = getDb();
+        db2.prepare("UPDATE verifications SET status = 'verified', quiz_passed_at = datetime('now'), attempts = 0, score = -1, answers_json = '[]' WHERE user_id = ? AND guild_id = ?")
+          .run(userId, guildId);
+
+        try {
+          const guild = await this.client.guilds.fetch(guildId);
+          const member = await guild.members.fetch(userId);
+          await member.roles.add(config.roles.verified);
+          await member.roles.remove(config.roles.unverified);
+
+          await this.sendLog(guildId,
+            new EmbedBuilder()
+              .setColor(Colors.Green)
+              .setTitle("Verified (Quiz Disabled)")
+              .setDescription(`**${username}** (<@${userId}>) was verified automatically (OAuth only, no quiz)`)
+              .setTimestamp()
+          );
+        } catch (err) {
+          console.error(`[${guildId}] Failed to auto-verify ${userId}:`, err);
+        }
+
+        await interaction.reply({
+          content: "✅ **Verified!** You now have full access.",
+          flags: MessageFlags.Ephemeral,
+        });
+        return;
+      }
+
       if (!config.quiz.questions.length && !config.quiz.finalQuestion) {
         await interaction.reply({ content: "No quiz configured. Admin needs to add questions with /quiz-add.", flags: MessageFlags.Ephemeral });
         return;

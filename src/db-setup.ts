@@ -52,6 +52,7 @@ migrateAddColumn("members", "guild_id", "TEXT");
 migrateAddColumn("verifications", "guild_id", "TEXT");
 migrateAddColumn("restore_runs", "guild_id", "TEXT");
 migrateAddColumn("channel_mappings", "guild_id", "TEXT");
+migrateAddColumn("guild_configs", "quiz_enabled", "INTEGER", "1");
 
 dropSingleColumnUniqueIndexes("members");
 dropSingleColumnUniqueIndexes("verifications");

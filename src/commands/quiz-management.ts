@@ -288,3 +288,32 @@ export async function handleManagementModal(interaction: Interaction, client: Cl
 
   return false;
 }
+
+// ─── /quiz-toggle ───
+export function getQuizToggleCommand() {
+  return new SlashCommandBuilder()
+    .setName("quiz-toggle")
+    .setDescription("Enable or disable the verification quiz (auth-only mode when off)")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator);
+}
+
+export async function handleQuizToggleCommand(interaction: CommandInteraction): Promise<void> {
+  const guildId = interaction.guild?.id || "";
+  const config = getGuildConfig(guildId);
+
+  if (!config.isSetup) {
+    await interaction.reply({ content: "❌ Run /setup first.", flags: MessageFlags.Ephemeral });
+    return;
+  }
+
+  const newState = !config.quiz.enabled;
+  saveGuildConfig(guildId, { quiz: { ...config.quiz, enabled: newState } });
+
+  await interaction.reply({
+    content:
+      newState
+        ? "✅ **Quiz enabled.** Users will need to pass the quiz after authorizing."
+        : "⛔ **Quiz disabled.** Users will be verified immediately after OAuth authorization (no quiz).",
+    flags: MessageFlags.Ephemeral,
+  });
+}

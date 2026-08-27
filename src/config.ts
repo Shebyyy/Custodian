@@ -39,6 +39,7 @@ export interface GuildConfig {
   roles: { unverified: string; verified: string; admin: string };
   channels: { verification: string; logs: string };
   quiz: {
+    enabled: boolean;
     maxAttempts: number;
     questions: QuizQuestion[];
     finalQuestion: FinalQuestion | null;
@@ -126,7 +127,7 @@ export function getGuildConfig(guildId: string): GuildConfig {
       guildId,
       roles: { unverified: "", verified: "", admin: "" },
       channels: { verification: "", logs: "" },
-      quiz: { maxAttempts: 3, questions: defaultQuestions, finalQuestion: defaultFinalQuestion },
+      quiz: { enabled: true, maxAttempts: 3, questions: defaultQuestions, finalQuestion: defaultFinalQuestion },
       termsAndConditions: defaultTerms,
       isSetup: false,
     };
@@ -159,6 +160,7 @@ export function getGuildConfig(guildId: string): GuildConfig {
       return { verification: c.verification || "", logs: c.logs || "" };
     })(),
     quiz: {
+      enabled: row.quiz_enabled ?? (row.quiz_json ? JSON.parse(row.quiz_json).enabled !== false : true),
       maxAttempts: row.max_attempts || 3,
       questions: quizData.questions,
       finalQuestion: quizData.finalQuestion,
@@ -176,8 +178,8 @@ export function saveGuildConfig(guildId: string, data: Partial<GuildConfig>): vo
   const merged: GuildConfig = { ...existing, ...data, guildId };
 
   db.prepare(`
-    INSERT INTO guild_configs (guild_id, roles_json, channels_json, quiz_json, terms, pass_percentage, max_attempts, is_setup, setup_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, 1, datetime('now'), datetime('now'))
+    INSERT INTO guild_configs (guild_id, roles_json, channels_json, quiz_json, terms, pass_percentage, max_attempts, quiz_enabled, is_setup, setup_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, datetime('now'), datetime('now'))
     ON CONFLICT(guild_id) DO UPDATE SET
       roles_json = excluded.roles_json,
       channels_json = excluded.channels_json,
@@ -185,6 +187,7 @@ export function saveGuildConfig(guildId: string, data: Partial<GuildConfig>): vo
       terms = excluded.terms,
       pass_percentage = excluded.pass_percentage,
       max_attempts = excluded.max_attempts,
+      quiz_enabled = excluded.quiz_enabled,
       is_setup = 1,
       setup_at = COALESCE(guild_configs.setup_at, excluded.setup_at),
       updated_at = datetime('now')
@@ -192,10 +195,11 @@ export function saveGuildConfig(guildId: string, data: Partial<GuildConfig>): vo
     guildId,
     JSON.stringify(merged.roles),
     JSON.stringify(merged.channels),
-    JSON.stringify({ questions: merged.quiz.questions, finalQuestion: merged.quiz.finalQuestion }),
+    JSON.stringify({ enabled: merged.quiz.enabled, questions: merged.quiz.questions, finalQuestion: merged.quiz.finalQuestion }),
     merged.termsAndConditions,
     100, // all must be correct
     merged.quiz.maxAttempts,
+    merged.quiz.enabled ? 1 : 0,
   );
 }
 
