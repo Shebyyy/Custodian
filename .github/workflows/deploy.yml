@@ -80,6 +80,18 @@ jobs:
 
             # Start bot
             echo "[6/6] Starting bot..."
+            # Kill old bot process if running
+            if [ -f /root/Custodian/data/bot.pid ]; then
+              OLD_PID=$(cat /root/Custodian/data/bot.pid 2>/dev/null)
+              if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+                echo "Killing old bot (PID: $OLD_PID)..."
+                kill "$OLD_PID" 2>/dev/null
+                sleep 2
+                kill -9 "$OLD_PID" 2>/dev/null
+              fi
+            fi
+            pkill -f "bun run.*/Custodian/src/index.ts" 2>/dev/null || true
+            sleep 1
             rm -f /root/Custodian/data/bot.pid
             nohup bun run /root/Custodian/src/index.ts > /root/Custodian/data/bot.log 2>&1 &
             BOT_PID=$!
