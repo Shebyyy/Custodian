@@ -58,12 +58,15 @@ function recreateTableWithoutStaleUnique(table: string, columns: Record<string, 
 
   if (!hasStaleAutoIndex) return; // already clean
 
+  const tempTable = `_temp_${table}_fix`;
+
+  // Only copy columns that actually exist in the old table
+  const existingCols = (db.prepare(`PRAGMA table_info(${table})`).all() as any[])
+    .map((c: any) => c.name);
+  const colNames = existingCols.join(", ");
   const colDefs = Object.entries(columns)
     .map(([name, type]) => `${name} ${type}`)
     .join(", ");
-
-  const tempTable = `_temp_${table}_fix`;
-  const colNames = Object.keys(columns).join(", ");
 
   db.exec(`CREATE TABLE ${tempTable} (${colDefs})`);
   db.exec(`INSERT OR IGNORE INTO ${tempTable} (${colNames}) SELECT ${colNames} FROM ${table}`);
