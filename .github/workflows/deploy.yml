@@ -90,7 +90,8 @@ jobs:
                 kill -9 "$OLD_PID" 2>/dev/null
               fi
             fi
-            pkill -f "bun run.*/Custodian/src/index.ts" 2>/dev/null || true
+            # Also kill anything on port 4000 (OAuth server)
+            fuser -k 4000/tcp 2>/dev/null || true
             sleep 1
             rm -f /root/Custodian/data/bot.pid
             nohup bun run /root/Custodian/src/index.ts > /root/Custodian/data/bot.log 2>&1 &
