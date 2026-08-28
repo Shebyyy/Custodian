@@ -35,13 +35,41 @@ function dropSingleColumnUniqueIndexes(table: string): void {
     for (const idx of idxs) {
       if (idx.unique) {
         const info = db.prepare(`PRAGMA index_info(${idx.name})`).all() as any[];
-        if (info.length === 1) {
+        if (info.length === 1 && !idx.name.startsWith("sqlite_autoindex_")) {
           db.prepare(`DROP INDEX IF EXISTS ${idx.name}`).run();
           console.log(`  Dropped old single-column unique index: ${idx.name} on ${table}`);
         }
       }
     }
   } catch {}
+}
+
+/**
+ * Recreates a table to remove stale single-column unique/primary-key constraints
+ * that can't be dropped via DROP INDEX (e.g. sqlite_autoindex from old PRIMARY KEY).
+ * Preserves all existing data.
+ */
+function recreateTableWithoutStaleUnique(table: string, columns: Record<string, string>): void {
+  // Check if the table has any sqlite_autoindex with 1 column (stale PK/UNIQUE on user_id)
+  const idxs = db.prepare(`PRAGMA index_list(${table})`).all() as any[];
+  const hasStaleAutoIndex = idxs.some((idx: any) =>
+    idx.unique && idx.name.startsWith("sqlite_autoindex_")
+  );
+
+  if (!hasStaleAutoIndex) return; // already clean
+
+  const colDefs = Object.entries(columns)
+    .map(([name, type]) => `${name} ${type}`)
+    .join(", ");
+
+  const tempTable = `_temp_${table}_fix`;
+  const colNames = Object.keys(columns).join(", ");
+
+  db.exec(`CREATE TABLE ${tempTable} (${colDefs})`);
+  db.exec(`INSERT OR IGNORE INTO ${tempTable} (${colNames}) SELECT ${colNames} FROM ${table}`);
+  db.exec(`DROP TABLE ${table}`);
+  db.exec(`ALTER TABLE ${tempTable} RENAME TO ${table}`);
+  console.log(`  Recreated ${table} table to remove stale unique constraints`);
 }
 
 // --- Legacy migrations (multi-server refactor) ---
@@ -56,6 +84,22 @@ migrateAddColumn("guild_configs", "quiz_enabled", "INTEGER", "1");
 
 dropSingleColumnUniqueIndexes("members");
 dropSingleColumnUniqueIndexes("verifications");
+
+// Fix leftover single-column unique constraint on members.user_id
+// (can't be dropped with DROP INDEX since it's a table-level PRIMARY KEY/UNIQUE from old schema)
+recreateTableWithoutStaleUnique("members", {
+  id: "INTEGER PRIMARY KEY AUTOINCREMENT",
+  user_id: "TEXT NOT NULL",
+  guild_id: "TEXT NOT NULL DEFAULT ''",
+  username: "TEXT NOT NULL",
+  nickname: "TEXT DEFAULT ''",
+  join_date: "TEXT NOT NULL",
+  leave_date: "TEXT",
+  roles_json: "TEXT DEFAULT '[]'",
+  last_seen: "TEXT DEFAULT (datetime('now'))",
+  is_active: "INTEGER DEFAULT 1",
+  created_at: "TEXT DEFAULT (datetime('now'))",
+});
 
 // ──────────────────────────────────────────────────────
 // BACKUP & RESTORE SYSTEM — Enhanced Schema
