@@ -68,6 +68,7 @@ function recreateTableWithoutStaleUnique(table: string, columns: Record<string, 
     .map(([name, type]) => `${name} ${type}`)
     .join(", ");
 
+  db.exec(`DROP TABLE IF EXISTS ${tempTable}`);
   db.exec(`CREATE TABLE ${tempTable} (${colDefs})`);
   db.exec(`INSERT OR IGNORE INTO ${tempTable} (${colNames}) SELECT ${colNames} FROM ${table}`);
   db.exec(`DROP TABLE ${table}`);
